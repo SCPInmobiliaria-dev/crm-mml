@@ -123,8 +123,21 @@ create function pg_temp.forma_unidad(e jsonb) returns text language plpgsql immu
 declare p jsonb;
 begin
   if jsonb_typeof(e) is distinct from 'object' then return 'no es un objeto'; end if;
-  if pg_temp.claves(e) <> 'area_m2,codigo,estado,geometria,tipo,zona_rubro' then
+  -- Desde 19 (precio por unidad) hay una séptima clave, `precio`: null, o
+  -- {monto, moneda} solo en una unidad disponible (lo prueba reglas-19.sql).
+  if pg_temp.claves(e) not in ('area_m2,codigo,estado,geometria,tipo,zona_rubro',
+                               'area_m2,codigo,estado,geometria,precio,tipo,zona_rubro') then
     return 'claves ' || pg_temp.claves(e);
+  end if;
+  if jsonb_typeof(e -> 'precio') = 'object' then
+    if pg_temp.claves(e -> 'precio') <> 'moneda,monto'
+       or jsonb_typeof(e -> 'precio' -> 'monto') <> 'number'
+       or (e -> 'precio' ->> 'moneda') not in ('USD', 'PEN')
+       or (e ->> 'estado') <> 'disponible' then
+      return 'precio';
+    end if;
+  elsif e ? 'precio' and jsonb_typeof(e -> 'precio') <> 'null' then
+    return 'precio: tipo';
   end if;
   if jsonb_typeof(e -> 'codigo') <> 'string' or btrim(e ->> 'codigo') = '' then return 'codigo'; end if;
   if jsonb_typeof(e -> 'tipo') <> 'string' then return 'tipo'; end if;
