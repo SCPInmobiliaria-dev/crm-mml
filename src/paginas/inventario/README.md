@@ -1,7 +1,7 @@
 # Pantalla: inventario (`/inventario`)
 
-🟢 Escrita · 10 de septiembre de 2026 · 🟡 plano interactivo añadido el 30 de septiembre de 2026
-(pendiente de probar con los datos cargados)
+🟢 Escrita · 10 de septiembre de 2026 · plano interactivo añadido el 30 de septiembre de 2026 ·
+geometría recalculada desde el PDF de arquitectura y casilla de precio por unidad el 6 de octubre de 2026
 
 El plano del mercado y la tabla de unidades con sus dos semáforos: la defensa visible contra la
 doble asignación.
@@ -10,13 +10,17 @@ doble asignación.
 
 | Archivo | Qué es |
 |---|---|
-| `index.tsx` | la pantalla: aviso calculado, modos Disponibilidad / Zonificación / Lista, filtros, ficha de la unidad elegida |
+| `index.tsx` | la pantalla: aviso calculado, modos Disponibilidad / Zonificación / Precios / Lista, filtros, ficha de la unidad elegida |
 | `PlanoInventario.tsx` | el visor SVG, portado de `D:/SCPCMO/02-marketing/diseño/inventario grafico/public/app.js` |
 | `ImportarInventario.tsx` | la carga inicial (CSV del cuadro de áreas + `seed.json`) — solo con la tabla vacía y para `direccion` / `administracion` |
-| `FormularioUnidad.tsx` | alta y edición — solo se dibuja para `direccion` y `administracion` |
+| `FormularioUnidad.tsx` | alta y edición — solo se dibuja para `direccion` y `administracion`; el desplegable de precio solo ofrece niveles del tipo de la unidad |
+| `AsignarPrecio.tsx` | asignar un nivel de precio (o quitarlo) a las unidades filtradas, en bloque y con confirmación — solo `direccion` y `administracion` |
+| `../../lib/precios-unidad.ts` | los niveles de precio leídos de `parametros`, sus textos y la llamada a `fn_asignar_precio` |
 | `../../lib/inventario.ts` | los dos semáforos, la consulta, los motivos del bloqueo, los filtros, los titulares y el guardado |
-| `../../../public/plano/` | `zonificacion.webp` (sobre la que se trazó la geometría) y `disponibilidad.webp` (referencia de origen) |
+| `../../../public/plano/` | `zonificacion.webp` (el render del PDF de arquitectura del que sale la geometría) y `disponibilidad.webp` (escaneo de origen, registrado sobre la zonificación) |
 | `../../../sql/14-inventario-grafico.sql` | `geometria`, `zona_rubro`, `revisar`, `fuente_disponibilidad` y el parámetro `inventario_disponibilidad_corte` |
+| `../../../sql/18-geometria-plano.sql` | los 473 polígonos calculados de los vectores del PDF de arquitectura (paredes, no trazo a mano) |
+| `../../../sql/19-precio-por-unidad.sql` | `t_unidades_precio_valido`, `fn_asignar_precio` y el `precio` en `fn_inventario_publico` |
 | `../../../sql/08-vistas-embudo-e-inventario.sql` | la vista `v_unidades_tablero` y la restricción `verde_exige_plano` — **hay que ejecutarlas en Supabase** |
 
 ## Quién decide qué se puede ofrecer
@@ -89,6 +93,28 @@ Ninguna cifra ni fecha está escrita en el código.
   plano funciona sin nombres. `v_unidades_tablero` sigue sin datos personales.
 - Si el código se publica antes de aplicar `sql/14`, la pantalla relee sin las columnas nuevas y lo
   dice (🟡), en vez de romperse.
+- **La geometría se calcula, no se traza** (`sql/18`): cada polígono es la celda que cierran las
+  paredes del PDF de arquitectura alrededor del rótulo de la unidad, ajustada a los ejes de pared.
+  Puestos espalda con espalda y tiendas quedan con el mismo eje que el plano. Las unidades sin
+  rótulo en el PDF quedan sin polígono (en «Sin ubicación en plano»), no dibujadas por aproximación.
+- «Ver plano de origen» superpone el escaneo de disponibilidad con un registro medido
+  (`ESCANEO_PX` en `PlanoInventario.tsx`), no estirado a ojo.
+
+## El precio de cada unidad
+
+Una unidad **no guarda un importe**: `precio_parametro` apunta a un **nivel** de `parametros`
+(`precio_puesto…` o `precio_tienda…`) con monto, moneda, fuente y semáforo. La base impide
+asignar un nivel de otro tipo o sin moneda (`t_unidades_precio_valido`), y solo `direccion` /
+`administracion` pueden asignar (`fn_asignar_precio`).
+
+- **Modo Precios** del plano: ámbar más intenso cuanto más caro es el nivel dentro de su tipo;
+  rayado = nivel que todavía no es 🟢; gris = sin precio asignado. El tooltip y la ficha dicen el
+  monto y el estado del nivel.
+- **La web solo ve el precio de una unidad disponible cuyo nivel está en 🟢 verde**
+  (`fn_inventario_publico`, clave `precio`). Un nivel 🔵 propuesta o 🟡 por validar se ve aquí,
+  marcado, y no sale de aquí. Al pasar un nivel a verde en Parámetros, la web se entera por el
+  mismo aviso Realtime del inventario.
+- Ninguna cifra vive en este código: los montos se leen de `parametros`.
 
 ## Lo que todavía no hace
 

@@ -20,7 +20,8 @@ import {
 } from '@/componentes/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { useSesion } from '@/auth/ContextoSesion'
-import { PENDIENTE, cargarParametrosPorId } from '@/lib/parametros'
+import { PENDIENTE, cargarParametros, cargarParametrosPorId } from '@/lib/parametros'
+import { nivelesDePrecio, textoPrecioUnidad, type NivelPrecio } from '@/lib/precios-unidad'
 import {
   ESTADOS_UNIDAD,
   FILTROS_VACIOS,
@@ -42,6 +43,7 @@ import {
   type FiltrosInventario,
   type Unidad,
 } from '@/lib/inventario'
+import { AsignarPrecio } from './AsignarPrecio'
 import { FormularioUnidad } from './FormularioUnidad'
 import { ImportarInventario } from './ImportarInventario'
 import { PlanoInventario, type ModoPlano } from './PlanoInventario'
@@ -84,12 +86,14 @@ import { PlanoInventario, type ModoPlano } from './PlanoInventario'
 const CLAVE = ['inventario', 'unidades'] as const
 const CLAVE_TITULARES = ['inventario', 'titulares'] as const
 const CLAVE_CORTE = ['inventario', 'corte'] as const
+const CLAVE_PRECIOS = ['inventario', 'parametros'] as const
 
 type Modo = ModoPlano | 'lista'
 
 const MODOS: readonly { valor: Modo; etiqueta: string }[] = [
   { valor: 'disponibilidad', etiqueta: 'Disponibilidad' },
   { valor: 'zonificacion', etiqueta: 'Zonificación' },
+  { valor: 'precio', etiqueta: 'Precios' },
   { valor: 'lista', etiqueta: 'Lista' },
 ] as const
 
@@ -103,6 +107,9 @@ export function PantallaInventario() {
     queryKey: CLAVE_CORTE,
     queryFn: () => cargarParametrosPorId([PARAMETRO_CORTE_DISPONIBILIDAD]),
   })
+  // Los niveles de precio (sql/19). Misma clave que el formulario de unidad:
+  // una sola lectura de `parametros` para los dos.
+  const precios = useQuery({ queryKey: CLAVE_PRECIOS, queryFn: cargarParametros })
 
   const [modo, setModo] = useState<Modo>('disponibilidad')
   const [filtros, setFiltros] = useState<FiltrosInventario>(FILTROS_VACIOS)
@@ -117,6 +124,8 @@ export function PantallaInventario() {
     [titulares.data],
   )
   const elegida = unidades.find((u) => u.id === seleccionada) ?? null
+  const niveles = useMemo(() => nivelesDePrecio(precios.data?.filas ?? []), [precios.data])
+  const nivelesPorId = useMemo(() => new Map<string, NivelPrecio>(niveles.map((n) => [n.id, n])), [niveles])
 
   const rubros = useMemo(() => valoresDistintos(unidades, (u) => u.zonaRubro), [unidades])
   const tipos = useMemo(() => valoresDistintos(unidades, (u) => u.tipo), [unidades])
@@ -203,6 +212,9 @@ export function PantallaInventario() {
             total={unidades.length}
           />
 
+          {/* Precio en bloque: los mismos que mantienen el inventario (fn_asignar_precio, sql/19). */}
+          {mantiene && <AsignarPrecio unidades={filtradas} niveles={niveles} alAsignar={refrescar} />}
+
           {modo === 'lista' ? (
             <>
               <Leyenda />
@@ -225,6 +237,7 @@ export function PantallaInventario() {
               rubros={rubros}
               seleccionada={seleccionada}
               alSeleccionar={setSeleccionada}
+              niveles={nivelesPorId}
             />
           )}
         </>
@@ -234,6 +247,7 @@ export function PantallaInventario() {
         <FichaUnidad
           unidad={elegida}
           titular={nombres.get(elegida.id) ?? null}
+          precio={textoPrecioUnidad(elegida.precioParametro, nivelesPorId)}
           mantiene={mantiene}
           alEditar={() => setEditando(elegida)}
           alQuitar={() => setSeleccionada(null)}
@@ -702,12 +716,15 @@ function textoUbicacion(u: Unidad): string {
 function FichaUnidad({
   unidad,
   titular,
+  precio,
   mantiene,
   alEditar,
   alQuitar,
 }: {
   unidad: Unidad
   titular: string | null
+  /** El nivel de precio al que apunta la unidad, ya en texto (src/lib/precios-unidad.ts). */
+  precio: { precio: string; detalle: string }
   mantiene: boolean
   alEditar: () => void
   alQuitar: () => void
@@ -733,6 +750,7 @@ function FichaUnidad({
     ['Estado comercial', `${comercial.simbolo} ${comercial.etiqueta}`],
     ['Estado del dato', `${dato.simbolo} ${dato.etiqueta}`],
     ['Rubro', u.zonaRubro ?? 'sin rubro en el plano'],
+    ['Precio de lista', precio.precio],
     ['Titular', titular ?? 'sin titular visible'],
     ['Ubicación', textoUbicacion(u)],
     ['Disponibilidad según', u.fuenteDisponibilidad ?? PENDIENTE],
@@ -779,8 +797,10 @@ function FichaUnidad({
         ))}
       </dl>
 
+      <p className="mt-3 text-xs text-azul-300">Precio: {precio.detalle}</p>
+
       {motivos.length > 0 && (
-        <p className="mt-3 text-xs">
+        <p className="mt-2 text-xs">
           <span className="font-bold">Por qué no se ofrece:</span> {motivos.join(' · ')}
         </p>
       )}
@@ -844,8 +864,9 @@ function Advertencias({
 
       <p className="text-xs text-suelo-500">
         Las unidades salen de <code>v_unidades_tablero</code> y «¿Se puede ofrecer?» lo decide{' '}
-        <code>v_unidades_ofrecibles</code>. Ningún precio se muestra aquí: el de cada unidad es un
-        puntero a <code>parametros</code>.
+        <code>v_unidades_ofrecibles</code>. El precio de cada unidad no se escribe aquí: es un
+        puntero a un nivel de <code>parametros</code>, con su fuente y su semáforo, y la web solo
+        publica los niveles 🟢.
       </p>
     </div>
   )
