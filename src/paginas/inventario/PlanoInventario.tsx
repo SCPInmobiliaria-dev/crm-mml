@@ -9,6 +9,7 @@ import {
   type Punto,
   type Unidad,
 } from '@/lib/inventario'
+import { textoMontoNivel, type NivelPrecio } from '@/lib/precios-unidad'
 
 /**
  * PLANO INVENTARIO — el visor gráfico, portado de
@@ -17,10 +18,14 @@ import {
  * ---------------------------------------------------------------------------
  * QUÉ SE CONSERVA DEL VISOR ORIGINAL Y QUÉ NO
  * ---------------------------------------------------------------------------
- * Se conserva la geometría (el mismo `viewBox` 85 75 900 1850 sobre la imagen
- * de 1050 × 2048, para que los polígonos trazados caigan donde se trazaron), el
- * zoom con −/+/Ajustar y Ctrl + rueda, el tooltip al pasar el mouse y la lista
- * aparte de las unidades sin ubicación.
+ * Se conserva el espacio de dibujo (el mismo `viewBox` 85 75 900 1850 sobre la
+ * imagen de 1050 × 2048), el zoom con −/+/Ajustar y Ctrl + rueda, el tooltip al
+ * pasar el mouse y la lista aparte de las unidades sin ubicación.
+ *
+ * Los polígonos ya no son los trazados a mano del visor original: desde
+ * sql/18 cada uno sale del PDF vectorial de zonificación, de la celda que
+ * rodea al rótulo de la unidad, con los bordes en el eje de los muros. Por eso
+ * un puesto y la tienda que tiene detrás comparten la misma línea.
  *
  * NO se conservan sus colores (amarillo, verde, lila…): no son de la marca y el
  * amarillo sobre fondo claro es justo lo que prohíbe 07-crm\CLAUDE.md §6. Aquí
@@ -40,20 +45,47 @@ import {
  * `unidades.geometria` en sql/14).
  */
 
-export type ModoPlano = 'disponibilidad' | 'zonificacion'
+export type ModoPlano = 'disponibilidad' | 'zonificacion' | 'precio'
 
-/** El espacio de dibujo en que se trazaron los polígonos (sql/14 §1). */
+/** El espacio de dibujo de los polígonos (sql/14 §1, sql/18). */
 const ANCHO_DIBUJO = 1050
 const ALTO_DIBUJO = 2048
 /** El encuadre del visor original: recorta los márgenes vacíos de la imagen. */
 const ENCUADRE = '85 75 900 1850'
+
+/** Dónde se pinta cada lámina de fondo, en unidades de dibujo. */
+type Lamina = { href: string; x: number; y: number; ancho: number; alto: number }
+
 /**
- * La imagen de disponibilidad tiene otra proporción (2600 × 5088 frente a
- * 2600 × 5073 de la de zonificación), así que se dibuja a su alto natural en
- * el mismo ancho. Es solo la referencia de origen: los polígonos se trazaron
- * sobre la de zonificación.
+ * La lámina de zonificación (2600 × 5073 px) ES el espacio de dibujo: es el
+ * render del PDF del que sql/18 sacó los polígonos, encajada en 1050 × 2048.
  */
-const ALTO_DISPONIBILIDAD = Math.round((ANCHO_DIBUJO * 5088) / 2600)
+const ZONIFICACION_PX = { ancho: 2600, alto: 5073 }
+const DIBUJO_POR_PX = Math.min(ANCHO_DIBUJO / ZONIFICACION_PX.ancho, ALTO_DIBUJO / ZONIFICACION_PX.alto)
+const LAMINA_ZONIFICACION: Lamina = {
+  href: '/plano/zonificacion.webp',
+  x: 0,
+  y: 0,
+  ancho: ZONIFICACION_PX.ancho * DIBUJO_POR_PX,
+  alto: ZONIFICACION_PX.alto * DIBUJO_POR_PX,
+}
+
+/**
+ * La de disponibilidad (2600 × 5088 px) es un escaneo de otra impresión del
+ * mismo plano, con otro margen y otra escala. Estirada al mismo ancho quedaba
+ * corrida respecto de los polígonos. Se registró contra la de zonificación
+ * (correlación de las líneas del dibujo, 05/10/2026): escala 0,997 y
+ * desplazamiento de 8 px a la derecha y 1 px hacia arriba, en píxeles de la de
+ * zonificación. Son medidas del dibujo, no cifras de negocio.
+ */
+const ESCANEO_PX = { ancho: 2600, alto: 5088, escala: 0.997, dx: 8, dy: -1 }
+const LAMINA_DISPONIBILIDAD: Lamina = {
+  href: '/plano/disponibilidad.webp',
+  x: ESCANEO_PX.dx * DIBUJO_POR_PX,
+  y: ESCANEO_PX.dy * DIBUJO_POR_PX,
+  ancho: ESCANEO_PX.ancho * ESCANEO_PX.escala * DIBUJO_POR_PX,
+  alto: ESCANEO_PX.alto * ESCANEO_PX.escala * DIBUJO_POR_PX,
+}
 
 const ZOOM_MIN = 1
 const ZOOM_MAX = 5
@@ -116,6 +148,7 @@ const RELLENOS_RUBRO = [
 ] as const
 
 const RELLENO_SIN_RUBRO = 'fill-azul-500'
+const RELLENO_SIN_PRECIO = 'fill-azul-500'
 
 function rellenoRubro(rubro: string | null, rubros: readonly string[]): string {
   if (rubro === null) return RELLENO_SIN_RUBRO
@@ -200,6 +233,35 @@ type PropsCapa = {
   rubros: readonly string[]
   seleccionada: string | null
   atenuada: boolean
+  niveles: ReadonlyMap<string, NivelPrecio>
+  intensidad: ReadonlyMap<string, number>
+}
+
+/**
+ * Modo Precio: el nivel de cada unidad como intensidad de ámbar, del más
+ * barato (tenue) al más caro (pleno) DENTRO de su tipo (puestos con puestos,
+ * tiendas con tiendas). Sin nivel: el azul de «sin dato». Un nivel que no es
+ * 🟢 (propuesta, por validar) lleva además el rayado fino: no se ofrece ni se
+ * publica. La cifra está en el tooltip y en la ficha; el color solo ordena.
+ */
+function intensidadesPorNivel(niveles: ReadonlyMap<string, NivelPrecio>): Map<string, number> {
+  const out = new Map<string, number>()
+  for (const tipo of ['puesto', 'tienda'] as const) {
+    const montos = [...new Set([...niveles.values()].filter((n) => n.tipo === tipo && n.monto !== null).map((n) => n.monto as number))].sort(
+      (a, b) => a - b,
+    )
+    for (const n of niveles.values()) {
+      if (n.tipo !== tipo || n.monto === null) continue
+      const i = montos.indexOf(n.monto)
+      out.set(n.id, montos.length <= 1 ? 1 : 0.25 + (0.75 * i) / (montos.length - 1))
+    }
+  }
+  return out
+}
+
+function nivelNoVigente(u: Unidad, niveles: ReadonlyMap<string, NivelPrecio>): boolean {
+  const n = u.precioParametro === null ? undefined : niveles.get(u.precioParametro)
+  return n !== undefined && n.semaforo !== 'verde'
 }
 
 const CapaUnidades = memo(function CapaUnidades({
@@ -209,6 +271,8 @@ const CapaUnidades = memo(function CapaUnidades({
   rubros,
   seleccionada,
   atenuada,
+  niveles,
+  intensidad,
 }: PropsCapa) {
   const elegida = unidades.find((u) => u.id === seleccionada && u.geometria !== null) ?? null
 
@@ -220,13 +284,22 @@ const CapaUnidades = memo(function CapaUnidades({
         const puntos = puntosSvg(u.geometria)
         const [cx, cy] = centro(u.geometria)
         const comercial = leerEstadoComercial(u.estadoComercial)
+        const opacidadPrecio = u.precioParametro === null ? undefined : intensidad.get(u.precioParametro)
         const relleno =
-          modo === 'zonificacion' ? rellenoRubro(u.zonaRubro, rubros) : rellenoDisponibilidad(u.estadoComercial)
+          modo === 'zonificacion'
+            ? rellenoRubro(u.zonaRubro, rubros)
+            : modo === 'precio'
+              ? opacidadPrecio === undefined
+                ? RELLENO_SIN_PRECIO
+                : 'fill-ambar'
+              : rellenoDisponibilidad(u.estadoComercial)
+        const nivel = u.precioParametro === null ? undefined : niveles.get(u.precioParametro)
         const etiqueta = [
           u.codigoUnidad,
           u.tipo,
           comercial.etiqueta,
           u.zonaRubro,
+          modo === 'precio' ? (nivel === undefined ? 'sin precio asignado' : textoMontoNivel(nivel)) : null,
           u.revisar !== null ? 'por revisar' : null,
           datoNoVerificado(u) ? 'dato no verificado' : null,
         ]
@@ -253,8 +326,9 @@ const CapaUnidades = memo(function CapaUnidades({
               )}
               strokeWidth={u.revisar !== null ? 1.8 : 0.8}
               strokeDasharray={u.revisar !== null ? '3 2' : undefined}
+              fillOpacity={modo === 'precio' ? opacidadPrecio : undefined}
             />
-            {modo === 'disponibilidad' && datoNoVerificado(u) && (
+            {((modo === 'disponibilidad' && datoNoVerificado(u)) || (modo === 'precio' && nivelNoVigente(u, niveles))) && (
               <polygon points={puntos} className="pointer-events-none [fill:url(#plano-trama-dato)]" opacity={0.55} />
             )}
             {/* Foco y hover: un contorno grueso extra, porque cambiar solo el
@@ -306,6 +380,7 @@ export function PlanoInventario({
   rubros,
   seleccionada,
   alSeleccionar,
+  niveles,
 }: {
   unidades: readonly Unidad[]
   /** Ids que pasan los filtros. Las demás se atenúan, no desaparecen: el plano sigue entero. */
@@ -316,7 +391,10 @@ export function PlanoInventario({
   rubros: readonly string[]
   seleccionada: string | null
   alSeleccionar: (id: string) => void
+  /** Los niveles de precio por id (sql/19): modo Precio y tooltip. */
+  niveles: ReadonlyMap<string, NivelPrecio>
 }) {
+  const intensidad = useMemo(() => intensidadesPorNivel(niveles), [niveles])
   const [zoom, setZoom] = useState(ZOOM_MIN)
   const [original, setOriginal] = useState(false)
   const [flotante, setFlotante] = useState<Flotante | null>(null)
@@ -382,16 +460,15 @@ export function PlanoInventario({
     setFlotante({ id, x: e.clientX, y: e.clientY })
   }
 
-  const imagen =
-    modo === 'disponibilidad' && original
-      ? { href: '/plano/disponibilidad.webp', alto: ALTO_DISPONIBILIDAD }
-      : { href: '/plano/zonificacion.webp', alto: ALTO_DIBUJO }
+  const imagen = modo === 'disponibilidad' && original ? LAMINA_DISPONIBILIDAD : LAMINA_ZONIFICACION
 
   return (
     <section aria-label="Plano del mercado" className="rounded-lg bg-azul p-3 text-cal sm:p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm">
-          <span className="font-black">{modo === 'zonificacion' ? 'Zonificación por rubro' : 'Disponibilidad'}</span>
+          <span className="font-black">
+            {modo === 'zonificacion' ? 'Zonificación por rubro' : modo === 'precio' ? 'Precio por unidad' : 'Disponibilidad'}
+          </span>
           <span className="ml-2 text-xs text-azul-300">
             {dibujadas} en el plano · {visibles.size} con los filtros
           </span>
@@ -457,10 +534,12 @@ export function PlanoInventario({
             <Tramas />
             <image
               href={imagen.href}
-              width={ANCHO_DIBUJO}
+              x={imagen.x}
+              y={imagen.y}
+              width={imagen.ancho}
               height={imagen.alto}
               opacity={original ? 1 : 0.17}
-              preserveAspectRatio="xMinYMin meet"
+              preserveAspectRatio="none"
               aria-hidden="true"
             />
             <g onClick={alClic} onKeyDown={alTecla} onPointerMove={alMover}>
@@ -471,6 +550,8 @@ export function PlanoInventario({
                 rubros={rubros}
                 seleccionada={seleccionada}
                 atenuada={original}
+                niveles={niveles}
+                intensidad={intensidad}
               />
             </g>
           </svg>
@@ -527,7 +608,13 @@ export function PlanoInventario({
       )}
 
       {flotante !== null && (
-        <Tooltip unidad={porId.get(flotante.id) ?? null} titular={titulares.get(flotante.id) ?? null} x={flotante.x} y={flotante.y} />
+        <Tooltip
+          unidad={porId.get(flotante.id) ?? null}
+          titular={titulares.get(flotante.id) ?? null}
+          niveles={niveles}
+          x={flotante.x}
+          y={flotante.y}
+        />
       )}
     </section>
   )
@@ -537,7 +624,17 @@ export function PlanoInventario({
 // Leyenda y tooltip
 // ---------------------------------------------------------------------------
 
-function Muestra({ relleno, rayado = false, discontinuo = false }: { relleno: string; rayado?: boolean; discontinuo?: boolean }) {
+function Muestra({
+  relleno,
+  rayado = false,
+  discontinuo = false,
+  opacidad,
+}: {
+  relleno: string
+  rayado?: boolean
+  discontinuo?: boolean
+  opacidad?: number
+}) {
   return (
     <svg viewBox="0 0 16 16" className="h-4 w-4 shrink-0" aria-hidden="true">
       <rect
@@ -548,6 +645,7 @@ function Muestra({ relleno, rayado = false, discontinuo = false }: { relleno: st
         className={cn(relleno, discontinuo ? 'stroke-cal' : 'stroke-azul-900')}
         strokeWidth={discontinuo ? 1.8 : 0.8}
         strokeDasharray={discontinuo ? '3 2' : undefined}
+        fillOpacity={opacidad}
       />
       {rayado && <rect x="1" y="1" width="14" height="14" className="[fill:url(#plano-trama-dato)]" opacity={0.55} />}
     </svg>
@@ -568,6 +666,23 @@ function Leyenda({ modo, rubros, hayRubroVacio }: { modo: ModoPlano; rubros: rea
           <li className="flex items-center gap-1.5">
             <Muestra relleno="fill-azul-300" rayado />
             Rayado fino: dato no verificado contra plano
+          </li>
+        </>
+      ) : modo === 'precio' ? (
+        <>
+          <li className="flex items-center gap-1.5">
+            <Muestra relleno="fill-ambar" opacidad={0.25} />
+            <Muestra relleno="fill-ambar" opacidad={0.6} />
+            <Muestra relleno="fill-ambar" />
+            Más intenso = nivel más caro, dentro de su tipo (puestos con puestos, tiendas con tiendas)
+          </li>
+          <li className="flex items-center gap-1.5">
+            <Muestra relleno="fill-ambar" opacidad={0.6} rayado />
+            Rayado fino: nivel en propuesta o por validar (no se ofrece ni se publica)
+          </li>
+          <li className="flex items-center gap-1.5">
+            <Muestra relleno={RELLENO_SIN_PRECIO} />
+            Sin precio asignado
           </li>
         </>
       ) : (
@@ -594,8 +709,21 @@ function Leyenda({ modo, rubros, hayRubroVacio }: { modo: ModoPlano; rubros: rea
   )
 }
 
-function Tooltip({ unidad, titular, x, y }: { unidad: Unidad | null; titular: string | null; x: number; y: number }) {
+function Tooltip({
+  unidad,
+  titular,
+  niveles,
+  x,
+  y,
+}: {
+  unidad: Unidad | null
+  titular: string | null
+  niveles: ReadonlyMap<string, NivelPrecio>
+  x: number
+  y: number
+}) {
   if (unidad === null) return null
+  const nivel = unidad.precioParametro === null ? undefined : niveles.get(unidad.precioParametro)
   const comercial = leerEstadoComercial(unidad.estadoComercial)
   const dato = esSemaforo(unidad.estadoDato)
     ? SEMAFORO_DATO[unidad.estadoDato]
@@ -618,6 +746,13 @@ function Tooltip({ unidad, titular, x, y }: { unidad: Unidad | null; titular: st
         {comercial.etiqueta} · {unidad.areaM2 === null ? 'área sin dato' : `${unidad.areaM2} m²`}
       </p>
       <p className="mt-0.5">{unidad.zonaRubro ?? 'Sin rubro en el plano'}</p>
+      <p className="mt-0.5">
+        {nivel === undefined
+          ? unidad.precioParametro === null
+            ? 'Sin precio asignado'
+            : `Precio: nivel ${unidad.precioParametro}`
+          : `Precio: ${textoMontoNivel(nivel)}`}
+      </p>
       <p className="mt-0.5">{titular ?? 'Sin titular visible'}</p>
       <p className="mt-0.5 text-azul-300">
         <span aria-hidden="true">{dato.simbolo}</span> {dato.etiqueta} ·{' '}

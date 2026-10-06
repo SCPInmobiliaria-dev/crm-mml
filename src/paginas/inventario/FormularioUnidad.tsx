@@ -13,7 +13,8 @@ import {
 import { Input, claseCampo } from '@/componentes/ui/input'
 import { Label } from '@/componentes/ui/label'
 import { cn } from '@/lib/utils'
-import { cargarParametros, simboloSemaforo } from '@/lib/parametros'
+import { cargarParametros } from '@/lib/parametros'
+import { etiquetaEstadoNivel, nivelesDePrecio, nivelesParaTipo, textoOpcionNivel } from '@/lib/precios-unidad'
 import {
   ESTADOS_UNIDAD,
   SEMAFORO_DATO,
@@ -73,6 +74,8 @@ export function FormularioUnidad({
     queryKey: ['inventario', 'parametros'],
     queryFn: cargarParametros,
   })
+  const opcionesPrecio = nivelesParaTipo(nivelesDePrecio(parametros.data?.filas ?? []), datos.tipo)
+  const nivelElegido = opcionesPrecio.find((n) => n.id === datos.precioParametro) ?? null
 
   function cambiar<C extends CampoUnidad>(campo: C, valor: DatosUnidad[C]) {
     setDatos((previo) => ({ ...previo, [campo]: valor }))
@@ -221,7 +224,7 @@ export function FormularioUnidad({
 
           {/* ---- EL PRECIO, COMO PUNTERO ---- */}
           <div className="space-y-2">
-            <Label htmlFor="precio-parametro">Precio (parámetro al que apunta)</Label>
+            <Label htmlFor="precio-parametro">Precio de lista (nivel de Parámetros)</Label>
             <select
               id="precio-parametro"
               value={datos.precioParametro}
@@ -229,21 +232,33 @@ export function FormularioUnidad({
               className={claseCampo}
               disabled={parametros.isPending}
             >
-              <option value="">— sin parámetro asignado —</option>
-              {(parametros.data?.filas ?? []).map((p) => (
-                <option key={p.id} value={p.id}>
-                  {simboloSemaforo(p.estadoSemaforo)} {p.id} · {p.descripcion}
+              <option value="">— sin precio asignado —</option>
+              {opcionesPrecio.map((n) => (
+                <option key={n.id} value={n.id}>
+                  {textoOpcionNivel(n)}
                 </option>
               ))}
+              {/* Un nivel guardado que ya no es de su tipo (la base no lo deja, pero
+                  un dato viejo sí podría): se muestra para no borrarlo sin querer. */}
+              {datos.precioParametro !== '' && !opcionesPrecio.some((n) => n.id === datos.precioParametro) && (
+                <option value={datos.precioParametro}>{datos.precioParametro} (no es un nivel de este tipo)</option>
+              )}
             </select>
+            {nivelElegido !== null && (
+              <p className="text-xs font-bold text-suelo-700">
+                Este nivel está {etiquetaEstadoNivel(nivelElegido.semaforo)}.
+              </p>
+            )}
             {parametros.error !== null && (
               <p className="text-xs font-bold text-alerta">
                 No se pudieron leer los parámetros: {parametros.error.message}
               </p>
             )}
             <p className="text-xs text-suelo-500">
-              La cifra vive en <code>parametros</code>, con su fuente y su semáforo. Aquí solo se
-              elige a cuál apunta esta unidad.
+              La cifra vive en <code>parametros</code>, con su fuente y su semáforo: aquí solo se
+              elige a qué nivel apunta esta unidad. Solo salen los niveles de su tipo
+              (<code>precio_puesto…</code> / <code>precio_tienda…</code>); crear o cambiar un monto lo hace
+              Dirección en Parámetros.
             </p>
           </div>
 
