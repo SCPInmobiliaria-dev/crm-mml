@@ -4,9 +4,14 @@ import { Button } from '@/componentes/ui/button'
 import { cn } from '@/lib/utils'
 import {
   SEMAFORO_DATO,
+  SITUACIONES_PLANO,
   esSemaforo,
   leerEstadoComercial,
+  separacionSinReflejar,
+  situacionEnPlano,
+  textoSituacion,
   type Punto,
+  type SituacionPlano,
   type Unidad,
 } from '@/lib/inventario'
 import { textoMontoNivel, type NivelPrecio } from '@/lib/precios-unidad'
@@ -38,8 +43,10 @@ import { textoMontoNivel, type NivelPrecio } from '@/lib/precios-unidad'
  * ---------------------------------------------------------------------------
  * EL PLANO NO DECIDE NADA
  * ---------------------------------------------------------------------------
- * Igual que la tabla: el relleno dice el ESTADO COMERCIAL que guarda la base, y
- * el tooltip dice si `v_unidades_ofrecibles` deja ofrecerla. Ninguna regla de
+ * El relleno dice la SITUACIÓN de la unidad (`situacionEnPlano`, en
+ * src/lib/inventario.ts): el estado comercial guardado y, por encima, los
+ * hechos —una separación viva se ve separada—, como en la web. El tooltip dice
+ * si `v_unidades_ofrecibles` deja ofrecerla. Ninguna regla de
  * negocio se recalcula aquí. Tampoco hay aquí ninguna cifra de negocio: las
  * coordenadas son píxeles de dibujo, no metros (comentario de
  * `unidades.geometria` en sql/14).
@@ -95,39 +102,28 @@ const ZOOM_MAX = 5
 // ---------------------------------------------------------------------------
 
 /**
- * Grupos del modo Disponibilidad. Responden a la misma pregunta que el
- * semáforo comercial de src/lib/inventario.ts («¿se puede ofrecer hoy?»), pero
- * con relleno en vez de emoji. Las clases se escriben enteras porque Tailwind
- * solo genera las que encuentra literales en el código.
+ * Rellenos del modo Disponibilidad, uno por SITUACIÓN (`situacionEnPlano`, en
+ * src/lib/inventario.ts): se pinta por los hechos —una separación viva se ve
+ * separada aunque el estado guardado diga otra cosa—, igual que la web. Las
+ * clases se escriben enteras porque Tailwind solo genera las que encuentra
+ * literales en el código.
+ *
+ *   disponible     ámbar liso
+ *   separada       franjas ámbar sobre azul («separada o reservada»)
+ *   vendida        azul claro liso
+ *   no_disponible  trama cruzada
  */
-const GRUPOS_DISPONIBILIDAD = [
-  { clave: 'disponible', etiqueta: 'Disponible', relleno: 'fill-ambar', estados: ['disponible'] },
-  {
-    clave: 'reservada',
-    etiqueta: 'Reservada temporal',
-    relleno: '[fill:url(#plano-trama-reservada)]',
-    estados: ['reservada_temporal'],
-  },
-  {
-    clave: 'colocada',
-    etiqueta: 'Colocada (separada, contratada, pagada o entregada)',
-    relleno: 'fill-azul-300',
-    estados: ['separada', 'contratada', 'pagada', 'entregada'],
-  },
-  {
-    clave: 'no_disponible',
-    etiqueta: 'No disponible',
-    relleno: '[fill:url(#plano-trama-cruz)]',
-    estados: ['no_disponible'],
-  },
-] as const
+const RELLENO_SITUACION: Readonly<Record<SituacionPlano, string>> = {
+  disponible: 'fill-ambar',
+  separada: '[fill:url(#plano-trama-reservada)]',
+  vendida: 'fill-azul-300',
+  no_disponible: '[fill:url(#plano-trama-cruz)]',
+  // Un estado que este cliente no conoce: se ve distinto, no se maquilla.
+  desconocida: 'fill-azul-500',
+}
 
-/** Un estado que este cliente no conoce: se ve distinto, no se maquilla. */
-const RELLENO_DESCONOCIDO = 'fill-azul-500'
-
-function rellenoDisponibilidad(estado: string): string {
-  const grupo = GRUPOS_DISPONIBILIDAD.find((g) => (g.estados as readonly string[]).includes(estado))
-  return grupo?.relleno ?? RELLENO_DESCONOCIDO
+function rellenoDisponibilidad(u: Unidad): string {
+  return RELLENO_SITUACION[situacionEnPlano(u)]
 }
 
 /**
@@ -283,7 +279,6 @@ const CapaUnidades = memo(function CapaUnidades({
         const visible = visibles.has(u.id)
         const puntos = puntosSvg(u.geometria)
         const [cx, cy] = centro(u.geometria)
-        const comercial = leerEstadoComercial(u.estadoComercial)
         const opacidadPrecio = u.precioParametro === null ? undefined : intensidad.get(u.precioParametro)
         const relleno =
           modo === 'zonificacion'
@@ -292,12 +287,12 @@ const CapaUnidades = memo(function CapaUnidades({
               ? opacidadPrecio === undefined
                 ? RELLENO_SIN_PRECIO
                 : 'fill-ambar'
-              : rellenoDisponibilidad(u.estadoComercial)
+              : rellenoDisponibilidad(u)
         const nivel = u.precioParametro === null ? undefined : niveles.get(u.precioParametro)
         const etiqueta = [
           u.codigoUnidad,
           u.tipo,
-          comercial.etiqueta,
+          textoSituacion(u),
           u.zonaRubro,
           modo === 'precio' ? (nivel === undefined ? 'sin precio asignado' : textoMontoNivel(nivel)) : null,
           u.revisar !== null ? 'por revisar' : null,
@@ -657,10 +652,10 @@ function Leyenda({ modo, rubros, hayRubroVacio }: { modo: ModoPlano; rubros: rea
     <ul className="mb-3 flex flex-wrap gap-x-4 gap-y-1.5 text-xs" aria-label="Leyenda del plano">
       {modo === 'disponibilidad' ? (
         <>
-          {GRUPOS_DISPONIBILIDAD.map((g) => (
-            <li key={g.clave} className="flex items-center gap-1.5">
-              <Muestra relleno={g.relleno} />
-              {g.etiqueta}
+          {SITUACIONES_PLANO.map((s) => (
+            <li key={s.valor} className="flex items-center gap-1.5">
+              <Muestra relleno={RELLENO_SITUACION[s.valor]} />
+              {s.etiqueta}
             </li>
           ))}
           <li className="flex items-center gap-1.5">
@@ -743,8 +738,13 @@ function Tooltip({
         <span className="ml-2 text-azul-300">{unidad.tipo ?? 'tipo sin dato'}</span>
       </p>
       <p className="mt-1">
-        {comercial.etiqueta} · {unidad.areaM2 === null ? 'área sin dato' : `${unidad.areaM2} m²`}
+        {textoSituacion(unidad)} · {unidad.areaM2 === null ? 'área sin dato' : `${unidad.areaM2} m²`}
       </p>
+      {separacionSinReflejar(unidad) && (
+        <p className="mt-0.5 font-bold text-ambar">
+          Estado guardado: {comercial.etiqueta} (no refleja la separación)
+        </p>
+      )}
       <p className="mt-0.5">{unidad.zonaRubro ?? 'Sin rubro en el plano'}</p>
       <p className="mt-0.5">
         {nivel === undefined

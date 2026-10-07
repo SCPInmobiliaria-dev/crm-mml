@@ -126,6 +126,8 @@ export function PantallaCobranza() {
   function refrescar() {
     void clienteConsultas.invalidateQueries({ queryKey: ['cobranza'] })
     void clienteConsultas.invalidateQueries({ queryKey: ['reportes'] })
+    // sql/17: pagar la última cuota pendiente mueve la unidad a «pagada».
+    void clienteConsultas.invalidateQueries({ queryKey: ['inventario'] })
   }
 
   return (

@@ -212,6 +212,9 @@ export function FormularioContrato() {
 
     void clienteConsultas.invalidateQueries({ queryKey: ['contratos'] })
     void clienteConsultas.invalidateQueries({ queryKey: ['cobranza'] })
+    // sql/17: un contrato vivo mueve la unidad a «contratada».
+    void clienteConsultas.invalidateQueries({ queryKey: ['inventario'] })
+    void clienteConsultas.invalidateQueries({ queryKey: ['separaciones'] })
 
     // La moneda ya pasó la validación de `crearContrato`, que rechaza ''. Si
     // aun así no fuera legible, se vuelve a la lista en vez de ofrecer un

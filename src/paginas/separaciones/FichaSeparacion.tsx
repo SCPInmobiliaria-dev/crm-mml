@@ -369,6 +369,8 @@ function Verificacion({ separacion }: { separacion: SeparacionCompleta }) {
 
     void cliente.invalidateQueries({ queryKey: ['separaciones'] })
     void cliente.invalidateQueries({ queryKey: ['hoy'] })
+    // sql/17: verificar mueve la unidad de «reservada temporal» a «separada».
+    void cliente.invalidateQueries({ queryKey: ['inventario'] })
   }
 
   if (yaVerificada) {

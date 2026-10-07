@@ -1,5 +1,7 @@
 import { supabase } from '@/lib/supabase'
 import { booleano, leerLote, monto, texto, type Lote } from '@/lib/lectura'
+import { comoRegistro, llamarRpc, type ResultadoAccion } from '@/lib/acciones'
+import { normalizarTelefono } from '@/lib/telefono'
 import type { Rol } from '@/auth/tipos-sesion'
 
 /**
@@ -137,7 +139,7 @@ export function esSemaforo(valor: unknown): valor is Semaforo {
  *
  *     ¿se puede ofrecer hoy?
  *
- *   🟢 libre · 🟡 bloqueo temporal · ⚫ ya colocada · 🔴 fuera de venta
+ *   🟢 libre · 🟡 bloqueo temporal (reservada o separada) · ⚫ vendida · 🔴 fuera de venta
  *
  * Por eso el simbolo NUNCA va solo: al lado va siempre la palabra exacta del
  * enum. La palabra es el dato; el simbolo es la urgencia. Y por eso una unidad
@@ -150,7 +152,11 @@ export function esSemaforo(valor: unknown): valor is Semaforo {
 export const ESTADOS_UNIDAD = [
   { valor: 'disponible', etiqueta: 'Disponible', simbolo: '🟢' },
   { valor: 'reservada_temporal', etiqueta: 'Reservada temporal', simbolo: '🟡' },
-  { valor: 'separada', etiqueta: 'Separada', simbolo: '⚫' },
+  // 🟡 y no ⚫ (07/10/2026): una separación «no es venta, no es contrato
+  // firmado y no asigna definitivamente una unidad física»
+  // (00-fuente-de-verdad\separacion-vigente.md §1). Es un bloqueo, no una
+  // unidad colocada; y la web la enseña como «separada», no como vendida.
+  { valor: 'separada', etiqueta: 'Separada', simbolo: '🟡' },
   { valor: 'contratada', etiqueta: 'Contratada', simbolo: '⚫' },
   { valor: 'pagada', etiqueta: 'Pagada', simbolo: '⚫' },
   { valor: 'entregada', etiqueta: 'Entregada', simbolo: '⚫' },
@@ -169,6 +175,81 @@ export function esEstadoUnidad(valor: unknown): valor is EstadoUnidad {
 export function leerEstadoComercial(valor: string): { etiqueta: string; simbolo: string } {
   const conocido = ESTADOS_UNIDAD.find((e) => e.valor === valor)
   return conocido ?? { etiqueta: valor, simbolo: '❔' }
+}
+
+// ---------------------------------------------------------------------------
+// Lo que el PLANO enseña de una unidad
+// ---------------------------------------------------------------------------
+
+/**
+ * La situación de una unidad tal como la pinta el plano del CRM.
+ *
+ * Hasta el 07/10/2026 el plano pintaba SOLO `estado_comercial`, y nada movía
+ * ese estado al registrar una separación: una unidad recién separada seguía
+ * pintada como «Disponible» (o como estaba) y solo la ficha decía que no se
+ * podía ofrecer. Ahora se pinta por los HECHOS, igual que la web:
+ *
+ *   separada    hay una separación viva, o una oportunidad activa la tiene
+ *               asignada, o el estado guardado es reservada_temporal/separada
+ *   vendida     contratada, pagada o entregada
+ *   no_disponible  retirada de venta (el estado lo puso una persona)
+ *   disponible  el estado guardado dice disponible y nada la está tomando
+ *
+ * La separación va PRIMERO, como en fn_inventario_publico (sql/16 y 19): si
+ * una unidad tiene una separación viva, eso es lo que se ve, diga lo que diga
+ * el estado guardado. Que se pueda OFRECER lo sigue decidiendo
+ * `v_unidades_ofrecibles` (columna `ofrecible`); esto solo decide el color.
+ *
+ * Una diferencia a propósito con la web: la web enseña una unidad ASIGNADA a
+ * una oportunidad (sin separación) como «no disponible», para no publicar el
+ * embudo de ventas. El equipo sí necesita verla como lo que es —un bloqueo
+ * mientras se cierra, que es la definición de `reservada_temporal` en
+ * 01-schema.sql—, así que aquí sale con las franjas de reservada.
+ */
+export type SituacionPlano = 'disponible' | 'separada' | 'vendida' | 'no_disponible' | 'desconocida'
+
+export const SITUACIONES_PLANO: readonly { valor: SituacionPlano; etiqueta: string }[] = [
+  { valor: 'disponible', etiqueta: 'Disponible' },
+  { valor: 'separada', etiqueta: 'Separada o reservada' },
+  { valor: 'vendida', etiqueta: 'Vendida (contratada, pagada o entregada)' },
+  { valor: 'no_disponible', etiqueta: 'No disponible (retirada de venta)' },
+]
+
+export function situacionEnPlano(u: Unidad): SituacionPlano {
+  const e = u.estadoComercial
+  if (u.tieneSeparacionViva === true || e === 'reservada_temporal' || e === 'separada') return 'separada'
+  if (e === 'contratada' || e === 'pagada' || e === 'entregada') return 'vendida'
+  if (e === 'no_disponible') return 'no_disponible'
+  if (e === 'disponible') return u.tieneAsignacionActiva === true ? 'separada' : 'disponible'
+  return 'desconocida'
+}
+
+/** La frase corta de la situación, con el PORQUÉ cuando no sale del estado guardado. */
+export function textoSituacion(u: Unidad): string {
+  const s = situacionEnPlano(u)
+  if (s === 'separada') {
+    if (u.tieneSeparacionViva === true) return 'Separada · separación viva'
+    if (u.tieneAsignacionActiva === true && u.estadoComercial === 'disponible') {
+      return 'Reservada · asignada a una oportunidad activa'
+    }
+    return leerEstadoComercial(u.estadoComercial).etiqueta
+  }
+  if (s === 'desconocida') return leerEstadoComercial(u.estadoComercial).etiqueta
+  return SITUACIONES_PLANO.find((x) => x.valor === s)?.etiqueta ?? u.estadoComercial
+}
+
+/**
+ * Una separación viva que el estado GUARDADO no refleja. Antes de sql/17 pasa
+ * con toda separación; después, solo si una persona puso el estado a mano
+ * encima (p. ej. «No disponible»). Se enseña para que alguien lo mire, no se
+ * corrige desde la pantalla.
+ */
+export function separacionSinReflejar(u: Unidad): boolean {
+  return (
+    u.tieneSeparacionViva === true &&
+    u.estadoComercial !== 'reservada_temporal' &&
+    u.estadoComercial !== 'separada'
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -573,6 +654,14 @@ export type DatosUnidad = {
   /** Id de `parametros`, o cadena vacia. Nunca un importe. */
   precioParametro: string
   observaciones: string
+  // --- El inventario maestro (columnas de 01-schema, no estan en v_unidades_tablero) ---
+  /** Fundador / Nuevo 2023 / … / Nuevo 2026. Texto libre: lo dice el kardex. */
+  tipoSocio: string
+  /** Minuta / Notaría / Registros Públicos / Titulado. Texto libre. */
+  estadoLegal: string
+  estadoFisico: string
+  /** Que documento respalda lo que dice esta fila (texto, no un archivo). */
+  documentoSustento: string
 }
 
 export type CampoUnidad = keyof DatosUnidad
@@ -623,7 +712,13 @@ function validar(datos: DatosUnidad): { motivo: string; campo: CampoUnidad } | n
   return null
 }
 
-function aFila(datos: DatosUnidad): Record<string, string | number | null> {
+/**
+ * `conMaestro` = incluir los cuatro campos del inventario maestro. Al EDITAR
+ * solo van si la pantalla pudo leer los valores que ya tenia la unidad: esas
+ * columnas no estan en `v_unidades_tablero`, y guardar «en blanco» lo que no se
+ * llego a leer borraria el dato.
+ */
+function aFila(datos: DatosUnidad, conMaestro: boolean): Record<string, string | number | null> {
   const area = datos.areaM2.trim()
   return {
     codigo_unidad: datos.codigoUnidad.trim(),
@@ -637,6 +732,14 @@ function aFila(datos: DatosUnidad): Record<string, string | number | null> {
     fuente_plano: oNulo(datos.fuentePlano),
     precio_parametro: oNulo(datos.precioParametro),
     observaciones: oNulo(datos.observaciones),
+    ...(conMaestro
+      ? {
+          tipo_socio: oNulo(datos.tipoSocio),
+          estado_legal: oNulo(datos.estadoLegal),
+          estado_fisico: oNulo(datos.estadoFisico),
+          documento_sustento: oNulo(datos.documentoSustento),
+        }
+      : {}),
   }
 }
 
@@ -654,11 +757,13 @@ function aFila(datos: DatosUnidad): Record<string, string | number | null> {
 export async function guardarUnidad(
   datos: DatosUnidad,
   id: string | null,
+  /** Al editar: ¿se leyeron los campos del inventario maestro? Ver `aFila`. En el alta, siempre. */
+  conMaestro = true,
 ): Promise<ResultadoGuardado> {
   const fallo = validar(datos)
   if (fallo !== null) return { ok: false, motivo: fallo.motivo, campo: fallo.campo }
 
-  const fila = aFila(datos)
+  const fila = aFila(datos, id === null || conMaestro)
 
   const { data, error } =
     id === null
@@ -703,6 +808,10 @@ export function unidadEnBlanco(): DatosUnidad {
     fuentePlano: '',
     precioParametro: '',
     observaciones: '',
+    tipoSocio: '',
+    estadoLegal: '',
+    estadoFisico: '',
+    documentoSustento: '',
   }
 }
 
@@ -724,5 +833,203 @@ export function unidadAFormulario(u: Unidad): DatosUnidad {
     fuentePlano: u.fuentePlano ?? '',
     precioParametro: u.precioParametro ?? '',
     observaciones: u.observaciones ?? '',
+    // Estos dos si vienen en la vista; los otros dos se completan al leer el
+    // detalle (`cargarDetalleUnidad`) y mientras tanto no se guardan.
+    tipoSocio: u.tipoSocio ?? '',
+    estadoLegal: u.estadoLegal ?? '',
+    estadoFisico: '',
+    documentoSustento: '',
   }
+}
+
+// ---------------------------------------------------------------------------
+// El titular y el detalle de una unidad (inventario maestro · sql/17)
+// ---------------------------------------------------------------------------
+
+/**
+ * Quien figura como dueño de la unidad. Es una fila de `personas` (es_socio):
+ * la misma persona que usa el resto del CRM, no una copia. Lleva DNI y
+ * telefonos de un tercero — Ley 29733, minimo necesario: solo se pide cuando
+ * Direccion o Administracion abre el detalle (07-crm\CLAUDE.md §5), y nunca sale
+ * en la web (fn_inventario_publico no lo devuelve).
+ */
+export type Titular = {
+  personaId: string
+  nombreCompleto: string
+  docTipo: string | null
+  docNumero: string | null
+  telefono: string | null
+  telefonoAlterno: string | null
+  email: string | null
+  notas: string | null
+}
+
+/** Lo que no esta en `v_unidades_tablero`: el kardex de la unidad y su titular. */
+export type DetalleUnidad = {
+  tipoSocio: string | null
+  estadoLegal: string | null
+  estadoFisico: string | null
+  documentoSustento: string | null
+  titular: Titular | null
+}
+
+export const TIPOS_DOCUMENTO_PERSONA = ['DNI', 'CE', 'RUC', 'Pasaporte'] as const
+
+const COLUMNAS_DETALLE =
+  'tipo_socio, estado_legal, estado_fisico, documento_sustento, titular_persona_id, ' +
+  'personas!unidades_titular_fk(id, nombre_completo, doc_tipo, doc_numero, telefono_e164, ' +
+  'telefono_alterno, email, notas)'
+
+function interpretarTitular(valor: unknown): Titular | null {
+  // PostgREST puede devolver el embebido como objeto o como arreglo de uno.
+  const persona = comoRegistro(Array.isArray(valor) ? (valor as unknown[])[0] : valor)
+  if (persona === null) return null
+  const personaId = texto(persona['id'])
+  const nombreCompleto = texto(persona['nombre_completo'])
+  if (personaId === null || nombreCompleto === null) return null
+  return {
+    personaId,
+    nombreCompleto,
+    docTipo: texto(persona['doc_tipo']),
+    docNumero: texto(persona['doc_numero']),
+    telefono: texto(persona['telefono_e164']),
+    telefonoAlterno: texto(persona['telefono_alterno']),
+    email: texto(persona['email']),
+    notas: texto(persona['notas']),
+  }
+}
+
+/**
+ * El detalle de UNA unidad, leido de la tabla (no de la vista). Lanza si falla,
+ * para `useQuery`. Si RLS no deja ver a la persona, `titular` sale null aunque
+ * la unidad tenga titular: la pantalla lo dice («sin titular visible»).
+ */
+export async function cargarDetalleUnidad(unidadId: string): Promise<DetalleUnidad> {
+  const { data, error } = await supabase
+    .from('unidades')
+    .select(COLUMNAS_DETALLE)
+    .eq('id', unidadId)
+    .limit(1)
+
+  if (error !== null) throw new Error(mensajeDeError(error.message))
+  const fila = comoRegistro(Array.isArray(data) ? (data as unknown[])[0] : null)
+  if (fila === null) throw new Error('La unidad no se encontró (¿está archivada?).')
+
+  return {
+    tipoSocio: texto(fila['tipo_socio']),
+    estadoLegal: texto(fila['estado_legal']),
+    estadoFisico: texto(fila['estado_fisico']),
+    documentoSustento: texto(fila['documento_sustento']),
+    titular: interpretarTitular(fila['personas']),
+  }
+}
+
+/** Lo que escribe el formulario del titular. Todo cadena: es lo que dan los `<input>`. */
+export type DatosTitular = {
+  nombre: string
+  docTipo: string
+  docNumero: string
+  telefono: string
+  telefonoAlterno: string
+  email: string
+  notas: string
+}
+
+export function titularEnBlanco(): DatosTitular {
+  return { nombre: '', docTipo: '', docNumero: '', telefono: '', telefonoAlterno: '', email: '', notas: '' }
+}
+
+export function titularAFormulario(t: Titular): DatosTitular {
+  return {
+    nombre: t.nombreCompleto,
+    docTipo: t.docTipo ?? '',
+    docNumero: t.docNumero ?? '',
+    telefono: t.telefono ?? '',
+    telefonoAlterno: t.telefonoAlterno ?? '',
+    email: t.email ?? '',
+    notas: t.notas ?? '',
+  }
+}
+
+export type CampoTitular = keyof DatosTitular
+
+export type ResultadoTitular =
+  | { ok: true; personaId: string; creada: boolean; reutilizada: boolean }
+  | { ok: false; motivo: string; campo?: CampoTitular }
+
+/** Un telefono vacio es «sin telefono»; uno escrito se lleva a E.164 o se rechaza con su motivo. */
+function telefonoParaGuardar(
+  valor: string,
+  campo: CampoTitular,
+): { ok: true; e164: string } | { ok: false; motivo: string; campo: CampoTitular } {
+  const limpio = valor.trim()
+  if (limpio === '') return { ok: true, e164: '' }
+  const r = normalizarTelefono(limpio)
+  return r.ok ? { ok: true, e164: r.e164 } : { ok: false, motivo: r.motivo, campo }
+}
+
+/** La base nombra sql/17 donde `llamarRpc` solo conoce a sql/13: se corrige aqui. */
+function motivoDeTitular(motivo: string): string {
+  return motivo.includes('sql/13')
+    ? 'Falta ejecutar sql/17-inventario-maestro.sql en Supabase: sin él no se puede guardar el titular.'
+    : motivo
+}
+
+/**
+ * Guarda al titular de una unidad (Direccion y Administracion). `personaId` =
+ * editar a esa persona; `null` = titular nuevo o ya conocido (la base busca por
+ * documento y luego por telefono, y NO pisa a quien ya existia). Todo el
+ * trabajo —crear o reutilizar la persona y vincularla— es una sola funcion de
+ * la base: `fn_guardar_titular_unidad`.
+ */
+export async function guardarTitular(
+  unidadId: string,
+  personaId: string | null,
+  datos: DatosTitular,
+): Promise<ResultadoTitular> {
+  if (datos.nombre.trim() === '') {
+    return { ok: false, motivo: 'El nombre del titular es obligatorio.', campo: 'nombre' }
+  }
+  if ((datos.docTipo.trim() === '') !== (datos.docNumero.trim() === '')) {
+    return {
+      ok: false,
+      motivo: 'El documento necesita su tipo y su número, o ninguno de los dos.',
+      campo: datos.docTipo.trim() === '' ? 'docTipo' : 'docNumero',
+    }
+  }
+  const tel = telefonoParaGuardar(datos.telefono, 'telefono')
+  if (!tel.ok) return tel
+  const tel2 = telefonoParaGuardar(datos.telefonoAlterno, 'telefonoAlterno')
+  if (!tel2.ok) return tel2
+
+  const r = await llamarRpc(
+    'fn_guardar_titular_unidad',
+    {
+      p_unidad_id: unidadId,
+      p_persona_id: personaId,
+      p_nombre: datos.nombre.trim(),
+      p_doc_tipo: datos.docTipo.trim(),
+      p_doc_numero: datos.docNumero.trim(),
+      p_telefono: tel.e164,
+      p_telefono_alterno: tel2.e164,
+      p_email: datos.email.trim(),
+      p_notas: datos.notas.trim(),
+    },
+    (resp) => {
+      const f = comoRegistro(resp)
+      const id = f === null ? null : texto(f['persona_id'])
+      if (f === null || id === null) return null
+      return { personaId: id, creada: f['creada'] === true, reutilizada: f['reutilizada'] === true }
+    },
+  )
+  if (!r.ok) return { ok: false, motivo: motivoDeTitular(r.motivo) }
+  return { ok: true, ...r.datos }
+}
+
+/** Suelta el vinculo con el titular. La persona NO se borra (R8). */
+export async function quitarTitular(unidadId: string): Promise<ResultadoAccion<true>> {
+  const r = await llamarRpc('fn_quitar_titular_unidad', { p_unidad_id: unidadId }, (resp) =>
+    comoRegistro(resp)?.['ok'] === true ? true : null,
+  )
+  return r.ok ? r : { ok: false, motivo: motivoDeTitular(r.motivo) }
 }

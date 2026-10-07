@@ -277,3 +277,37 @@ memoria, se le cargan los SQL del repo y se tira al terminar. Nada sale de la m�
 |---|---|---|
 | 30/09/2026 | PGlite local (vacía y con copia simulada) | 30 pasan · 0 fallan · 0 omitidas; 13 dos veces sin cambios; contrato sin desajustes |
 | — | Supabase (proyecto real) | [PENDIENTE] |
+
+---
+
+## 11. Pruebas de 17 (`pruebas/reglas-17.sql`)
+
+**Estado:** 🟡 **24 de 24 pasan en un ensayo LOCAL** (PGlite, 07/10/2026) sobre una copia del
+estado de producción (01..14 + 16 + 18 + 19, más una separación y un contrato vivos de antes de
+17), con 17 aplicado **dos veces** (la segunda no cambia nada). También con 20 aplicado encima.
+Contra el proyecto real de Supabase **todavía no se ha corrido**: hasta anotarlo en §7 no se
+declara nada VALIDADO.
+
+**Qué cubre:**
+
+| Grupo | Qué |
+|---|---|
+| SEG | Las funciones de titular son DEFINER con `search_path` fijo, las ejecuta `authenticated` y ni `anon` ni PUBLIC; las cinco funciones internas del estado no las ejecuta nadie |
+| EST | Separación pendiente → `reservada_temporal`; verificada → `separada`; devuelta, vencida o archivada → vuelve a donde estaba; contrato → `contratada`; cuotas pagadas o condonadas → `pagada`; contrato archivado → vuelve; no pisa `no_disponible`, `entregada` ni un estado a mano más adelantado; un cambio a mano entre medias se respeta; mover la separación de unidad; R1 sigue en pie; bitácora con actor; idempotencia; la web ve «separada» |
+| TIT | Dirección y Administración sí; Comercial, Lectura, un usuario desactivado (`es()` NULL) y `anon` no; no duplica personas por documento; valida nombre, documento, teléfono y correo; quitar el titular no borra a la persona |
+| DOC | Papeles de una unidad: solo Dirección y Administración los suben y los leen (tabla y bucket); persona o unidad obligatoria; tipos nuevos; archivar con motivo; los documentos de una persona siguen igual |
+
+**En Supabase:** después de aplicar 17, SQL Editor → pegar `reglas-17.sql` entero → Run. Necesita
+un perfil activo de dirección, administración, comercial y lectura o contabilidad (si falta uno, la
+fila PRE sale 🟡). Todo va entre `begin … rollback`. Lo esperado: la fila 9999 dice
+`24 pasan · 0 fallan · 0 omitidas`.
+
+**Ojo con 20:** si `sql/20-inventario-publico-como-crm.sql` está aplicado, `reglas-16.sql` (filas 7
+y 9) y `reglas-19.sql` (fila 14) fallan porque siguen exigiendo las claves EXACTAS de antes de 20
+(20 añade `verificada` y `precios_publicados`). No es un agujero: esas pruebas hay que actualizarlas
+junto con 20.
+
+| Fecha | Dónde | Resultado |
+|---|---|---|
+| 07/10/2026 | PGlite local (01..14 + 16 + 18 + 19 + 17, y también con 20) | 24 pasan · 0 fallan · 0 omitidas; 17 dos veces sin cambios; 13, 16, 19 y `reglas.sql` sin regresiones |
+| — | Supabase (proyecto real) | [PENDIENTE] |

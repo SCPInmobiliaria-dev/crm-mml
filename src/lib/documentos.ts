@@ -55,8 +55,34 @@ export const TIPOS_DOCUMENTO = [
 
 export type TipoDocumento = (typeof TIPOS_DOCUMENTO)[number]['valor']
 
+/**
+ * Los papeles de una UNIDAD (inventario maestro, sql/17). Son los que se ofrecen
+ * al adjuntar a una unidad: algunos ya existían para la persona (contrato, DNI,
+ * recibo, otro) y los demás son nuevos en la base. La lista de la ficha de una
+ * persona NO cambia. Etiquetas del archivo, no afirmaciones legales: lo que un
+ * papel prueba lo dice el papel.
+ */
+export const TIPOS_PAPEL_UNIDAD = [
+  { valor: 'minuta', etiqueta: 'Minuta' },
+  { valor: 'contrato', etiqueta: 'Contrato' },
+  { valor: 'escritura', etiqueta: 'Escritura' },
+  { valor: 'tramite_notarial', etiqueta: 'Trámite notarial' },
+  { valor: 'tramite_registral', etiqueta: 'Trámite registral' },
+  { valor: 'dni', etiqueta: 'DNI / CE del titular' },
+  { valor: 'carta_poder', etiqueta: 'Carta poder' },
+  { valor: 'plano_unidad', etiqueta: 'Plano de la unidad' },
+  { valor: 'recibo', etiqueta: 'Recibo / comprobante' },
+  { valor: 'otro', etiqueta: 'Otro' },
+] as const
+
+export type TipoPapelUnidad = (typeof TIPOS_PAPEL_UNIDAD)[number]['valor']
+
 export function etiquetaTipoDocumento(tipo: string): string {
-  return TIPOS_DOCUMENTO.find((t) => t.valor === tipo)?.etiqueta ?? tipo
+  return (
+    TIPOS_DOCUMENTO.find((t) => t.valor === tipo)?.etiqueta ??
+    TIPOS_PAPEL_UNIDAD.find((t) => t.valor === tipo)?.etiqueta ??
+    tipo
+  )
 }
 
 /** Límite del bucket (`file_size_limit`). Técnico, no del negocio. */
@@ -86,7 +112,10 @@ const SEGUNDOS_URL_FIRMADA = 300
 
 export type Documento = {
   id: string
-  personaId: string
+  /** `null` solo en un papel de UNIDAD sin titular (sql/17). */
+  personaId: string | null
+  /** Unidad a la que pertenece el papel (sql/17); `null` en los de una persona. */
+  unidadId: string | null
   oportunidadId: string | null
   tipo: string
   sentido: string
@@ -101,6 +130,15 @@ export type Documento = {
 }
 
 const COLUMNAS_DOCUMENTO =
+  'id, persona_id, unidad_id, oportunidad_id, tipo, sentido, nombre_archivo, ruta, mime, ' +
+  'tamano_bytes, nota, verificado_el, creado_el, creado_por'
+
+/**
+ * Hasta sql/17 la columna `unidad_id` no existe: pedirla haría fallar TODA
+ * lectura de documentos, incluida la de la ficha de una persona. Por eso esa
+ * lectura sigue pidiendo solo las columnas de siempre.
+ */
+const COLUMNAS_DOCUMENTO_PERSONA =
   'id, persona_id, oportunidad_id, tipo, sentido, nombre_archivo, ruta, mime, tamano_bytes, ' +
   'nota, verificado_el, creado_el, creado_por'
 
@@ -110,14 +148,17 @@ function interpretarDocumento(fila: unknown): Documento | null {
 
   const id = texto(f['id'])
   const personaId = texto(f['persona_id'])
+  const unidadId = texto(f['unidad_id'])
   const tipo = texto(f['tipo'])
   const sentido = texto(f['sentido'])
   const nombreArchivo = texto(f['nombre_archivo'])
   const ruta = texto(f['ruta'])
   const creadoEl = texto(f['creado_el'])
+  // Un papel cuelga de una persona o de una unidad: sin ninguna de las dos no
+  // es una fila que este cliente sepa mostrar (la base tampoco la admite).
   if (
     id === null ||
-    personaId === null ||
+    (personaId === null && unidadId === null) ||
     tipo === null ||
     sentido === null ||
     nombreArchivo === null ||
@@ -130,6 +171,7 @@ function interpretarDocumento(fila: unknown): Documento | null {
   return {
     id,
     personaId,
+    unidadId,
     oportunidadId: texto(f['oportunidad_id']),
     tipo,
     sentido,
@@ -153,12 +195,35 @@ function interpretarDocumento(fila: unknown): Documento | null {
 export async function cargarDocumentos(personaId: string): Promise<Documento[]> {
   const { data, error } = await supabase
     .from('documentos')
-    .select(COLUMNAS_DOCUMENTO)
+    .select(COLUMNAS_DOCUMENTO_PERSONA)
     .eq('persona_id', personaId)
     .is('archivado_el', null)
     .order('creado_el', { ascending: false })
 
   reventar('No se pudieron leer los documentos', error)
+  return leerLote(data, interpretarDocumento).filas
+}
+
+/**
+ * Los papeles vigentes de una UNIDAD (sql/17), el más reciente primero. Solo
+ * Dirección y Administración los ven (política doc_leer): para cualquier otro
+ * rol la lista llega vacía, no con error. Lanza si falla, para `useQuery`.
+ */
+export async function cargarDocumentosDeUnidad(unidadId: string): Promise<Documento[]> {
+  const { data, error } = await supabase
+    .from('documentos')
+    .select(COLUMNAS_DOCUMENTO)
+    .eq('unidad_id', unidadId)
+    .is('archivado_el', null)
+    .order('creado_el', { ascending: false })
+
+  if (error !== null && /unidad_id/.test(error.message)) {
+    throw new Error(
+      'Falta aplicar sql/17-inventario-maestro.sql en Supabase: la tabla «documentos» todavía ' +
+        'no tiene la columna unidad_id.',
+    )
+  }
+  reventar('No se pudieron leer los papeles de la unidad', error)
   return leerLote(data, interpretarDocumento).filas
 }
 
@@ -212,12 +277,19 @@ function mensajeDeStorageDocumentos(mensaje: string): string {
   return `No se pudo subir el archivo: ${mensaje}`
 }
 
-function mensajeDeFila(mensaje: string): string {
-  if (mensaje.includes('row-level security') || mensaje.includes('permission denied')) {
+function mensajeDeFila(mensaje: string, esDeUnidad = false): string {
+  if (esDeUnidad && /unidad_id|documentos_persona_o_unidad|documentos_tipo_valido/.test(mensaje)) {
     return (
-      'La base no dejó registrar el documento: tu rol no puede adjuntar documentos a esta ' +
-      'oportunidad (solo quien la lleva, Dirección o Administración). No se subió nada.'
+      'Falta aplicar sql/17-inventario-maestro.sql en Supabase: sin él la tabla «documentos» ' +
+      'no admite papeles de una unidad. No se subió nada.'
     )
+  }
+  if (mensaje.includes('row-level security') || mensaje.includes('permission denied')) {
+    return esDeUnidad
+      ? 'La base no dejó registrar el papel: solo Dirección y Administración adjuntan papeles ' +
+          'a una unidad. No se subió nada.'
+      : 'La base no dejó registrar el documento: tu rol no puede adjuntar documentos a esta ' +
+          'oportunidad (solo quien la lleva, Dirección o Administración). No se subió nada.'
   }
   if (mensaje.includes('could not find') || mensaje.includes('does not exist')) {
     return 'Falta ejecutar sql/13-seguimiento-comercial.sql en Supabase: la tabla «documentos» no existe.'
@@ -242,12 +314,20 @@ function carpetaDelMes(fecha: Date): string {
  */
 export async function subirDocumento(d: {
   archivo: File
-  personaId: string
+  /** `null` solo en un papel de unidad sin titular (sql/17). */
+  personaId: string | null
+  /** Dar la unidad convierte el documento en un PAPEL DE UNIDAD (solo Dirección y Administración). */
+  unidadId?: string | null | undefined
   oportunidadId: string | null
-  tipo: TipoDocumento
+  tipo: TipoDocumento | TipoPapelUnidad
   sentido: 'recibido' | 'enviado'
   nota?: string | undefined
 }): Promise<ResultadoAccion<Documento>> {
+  const unidadId = d.unidadId ?? null
+  if (d.personaId === null && unidadId === null) {
+    return { ok: false, motivo: 'Un papel tiene que colgar de una persona o de una unidad.' }
+  }
+
   const mime = tipoAdmitido(d.archivo)
   if (mime === null) {
     return {
@@ -265,14 +345,19 @@ export async function subirDocumento(d: {
   const ahora = new Date()
   const id = crypto.randomUUID()
   const extension = TIPOS_ADMITIDOS[mime] ?? extensionDe(d.archivo.name) ?? 'bin'
-  const ruta = `${d.oportunidadId ?? d.personaId}/${carpetaDelMes(ahora)}/${id}.${extension}`
+  // La carpeta es un identificador, nunca un nombre: la de una unidad lleva su id.
+  const carpeta = unidadId ?? d.oportunidadId ?? d.personaId
+  const ruta = `${carpeta}/${carpetaDelMes(ahora)}/${id}.${extension}`
   const nombreArchivo = nombreParaMostrar(d.archivo.name)
   const notaLimpia = d.nota === undefined || d.nota.trim() === '' ? null : d.nota.trim()
 
   // 1 · La fila. Sin `.select()`: ver el comentario de la función.
+  // `unidad_id` solo viaja cuando hay unidad: antes de sql/17 esa columna no
+  // existe y mandarla (aunque fuera null) rompería también el documento de una persona.
   const { error: errorFila } = await supabase.from('documentos').insert({
     id,
     persona_id: d.personaId,
+    ...(unidadId === null ? {} : { unidad_id: unidadId }),
     oportunidad_id: d.oportunidadId,
     tipo: d.tipo,
     sentido: d.sentido,
@@ -282,7 +367,9 @@ export async function subirDocumento(d: {
     tamano_bytes: d.archivo.size,
     nota: notaLimpia,
   })
-  if (errorFila !== null) return { ok: false, motivo: mensajeDeFila(errorFila.message) }
+  if (errorFila !== null) {
+    return { ok: false, motivo: mensajeDeFila(errorFila.message, unidadId !== null) }
+  }
 
   // 2 · El archivo.
   const { error: errorArchivo } = await supabase.storage
@@ -308,6 +395,7 @@ export async function subirDocumento(d: {
     datos: {
       id,
       personaId: d.personaId,
+      unidadId,
       oportunidadId: d.oportunidadId,
       tipo: d.tipo,
       sentido: d.sentido,
