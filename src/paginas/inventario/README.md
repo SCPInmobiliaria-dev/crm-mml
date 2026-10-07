@@ -1,7 +1,8 @@
 # Pantalla: inventario (`/inventario`)
 
 🟢 Escrita · 10 de septiembre de 2026 · plano interactivo añadido el 30 de septiembre de 2026 ·
-geometría recalculada desde el PDF de arquitectura y casilla de precio por unidad el 6 de octubre de 2026
+geometría recalculada desde el PDF de arquitectura y casilla de precio por unidad el 6 de octubre de 2026 ·
+🟡 titular, papeles y separaciones en el plano el 7 de octubre de 2026 (necesita `sql/17`, por aplicar)
 
 El plano del mercado y la tabla de unidades con sus dos semáforos: la defensa visible contra la
 doble asignación.
@@ -14,13 +15,17 @@ doble asignación.
 | `PlanoInventario.tsx` | el visor SVG, portado de `D:/SCPCMO/02-marketing/diseño/inventario grafico/public/app.js` |
 | `ImportarInventario.tsx` | la carga inicial (CSV del cuadro de áreas + `seed.json`) — solo con la tabla vacía y para `direccion` / `administracion` |
 | `FormularioUnidad.tsx` | alta y edición — solo se dibuja para `direccion` y `administracion`; el desplegable de precio solo ofrece niveles del tipo de la unidad |
+| `TitularUnidad.tsx` | pestaña «Titular» de la edición: el dueño de la unidad (una fila de `personas`), vía `fn_guardar_titular_unidad` / `fn_quitar_titular_unidad` |
+| `PapelesUnidad.tsx` | pestaña «Papeles y trámites»: minuta, escritura, trámites… adjuntos a la unidad (`documentos.unidad_id`, bucket privado `documentos`) |
 | `AsignarPrecio.tsx` | asignar un nivel de precio (o quitarlo) a las unidades filtradas, en bloque y con confirmación — solo `direccion` y `administracion` |
+| `../../lib/inventario-en-vivo.ts` | escucha el aviso Realtime de `sql/16` («inventario-publico») y vuelve a leer el inventario |
 | `../../lib/precios-unidad.ts` | los niveles de precio leídos de `parametros`, sus textos y la llamada a `fn_asignar_precio` |
 | `../../lib/inventario.ts` | los dos semáforos, la consulta, los motivos del bloqueo, los filtros, los titulares y el guardado |
 | `../../../public/plano/` | `zonificacion.webp` (el render del PDF de arquitectura del que sale la geometría) y `disponibilidad.webp` (escaneo de origen, registrado sobre la zonificación) |
 | `../../../sql/14-inventario-grafico.sql` | `geometria`, `zona_rubro`, `revisar`, `fuente_disponibilidad` y el parámetro `inventario_disponibilidad_corte` |
 | `../../../sql/18-geometria-plano.sql` | los 473 polígonos calculados de los vectores del PDF de arquitectura (paredes, no trazo a mano) |
 | `../../../sql/19-precio-por-unidad.sql` | `t_unidades_precio_valido`, `fn_asignar_precio` y el `precio` en `fn_inventario_publico` |
+| `../../../sql/17-inventario-maestro.sql` | 🟡 por aplicar: el estado de la unidad sigue a la separación, el contrato y las cuotas; titular y papeles de la unidad |
 | `../../../sql/08-vistas-embudo-e-inventario.sql` | la vista `v_unidades_tablero` y la restricción `verde_exige_plano` — **hay que ejecutarlas en Supabase** |
 
 ## Quién decide qué se puede ofrecer
@@ -67,7 +72,7 @@ lo comprueba, pero solo para ahorrar el viaje.
 | Columna | Qué es |
 |---|---|
 | **Estado del dato** | literal: `unidades.estado_dato` **es** el enum `semaforo`. Aquí no se interpreta nada |
-| **Estado comercial** | 🔵 **propuesta**: `estado_unidad` no tiene color en la base. El símbolo responde a «¿se puede ofrecer hoy?» — 🟢 libre · 🟡 bloqueo temporal · ⚫ ya colocada · 🔴 fuera de venta — y **nunca va solo**: al lado va siempre la palabra exacta del enum |
+| **Estado comercial** | 🔵 **propuesta**: `estado_unidad` no tiene color en la base. El símbolo responde a «¿se puede ofrecer hoy?» — 🟢 libre · 🟡 bloqueo temporal (reservada o separada) · ⚫ vendida (contratada, pagada, entregada) · 🔴 fuera de venta — y **nunca va solo**: al lado va siempre la palabra exacta del enum |
 
 La leyenda está impresa en la pantalla, no solo aquí.
 
@@ -99,6 +104,50 @@ Ninguna cifra ni fecha está escrita en el código.
   rótulo en el PDF quedan sin polígono (en «Sin ubicación en plano»), no dibujadas por aproximación.
 - «Ver plano de origen» superpone el escaneo de disponibilidad con un registro medido
   (`ESCANEO_PX` en `PlanoInventario.tsx`), no estirado a ojo.
+
+## Las separaciones en el plano
+
+Hasta el 7 de octubre de 2026 el plano pintaba **solo** `estado_comercial`, y nada lo movía al
+registrar una separación: la unidad recién separada seguía con el color de antes y solo la ficha
+decía «no se puede ofrecer». Dos arreglos, que se sostienen el uno al otro:
+
+- **La pantalla pinta por los hechos** (`situacionEnPlano` en `../../lib/inventario.ts`), igual
+  que la web: una separación viva, una oportunidad activa con la unidad asignada, o el estado
+  `reservada_temporal` / `separada` → **franjas ámbar, «Separada o reservada»**;
+  `contratada` / `pagada` / `entregada` → **azul, «Vendida»**; `no_disponible` → trama cruzada.
+  Si el estado guardado no refleja una separación viva, la ficha y el tooltip lo dicen.
+- **La base mueve el estado** (`sql/17`): separación pendiente → `reservada_temporal`;
+  verificada → `separada`; contrato vivo → `contratada`; todas las cuotas pagadas o condonadas →
+  `pagada`; y al devolverse, vencer o archivarse la separación (o archivarse el contrato) la unidad
+  **vuelve al estado que tenía**. No toca `no_disponible` ni `entregada` ni un estado puesto a
+  mano que vaya más adelante.
+- **Un reloj vencido no libera la unidad.** El reloj 1 (derecho de devolución) solo dice hasta
+  cuándo el cliente puede pedir su dinero. Qué pasa «al día 8» si no se firma contrato **no tiene
+  regla escrita** (`00-fuente-de-verdad/separacion-vigente.md` §3.3, decide Walter): hasta
+  entonces, la separación la devuelve, la vence o la archiva una persona.
+- La única diferencia con la web es a propósito: la web enseña una unidad **asignada** (sin
+  separación) como «no disponible» para no publicar el embudo; aquí sale con franjas.
+
+## El titular y los papeles (inventario maestro · `sql/17`)
+
+«Editar» abre tres pestañas: **Datos** (lo de siempre más el kardex: tipo de socio, estado legal,
+estado físico, documento de sustento), **Titular** y **Papeles y trámites**. La ficha tiene además
+un acceso directo «Titular y papeles» para **cualquier** unidad, esté o no disponible.
+
+- El titular es una persona del CRM (`es_socio`), no una copia: `fn_guardar_titular_unidad` la
+  busca por documento y luego por teléfono, la crea si no existe y **no pisa** a quien ya existía
+  salvo que se la edite expresamente. Quitar el titular suelta el vínculo; la persona no se borra.
+- Los papeles cuelgan de la unidad (`documentos.unidad_id`, persona opcional) y solo los ven y
+  suben **Dirección y Administración** (políticas `doc_leer` / `doc_crear` de `sql/17`). Nada se
+  borra: se archivan con motivo.
+- Ni el titular ni los papeles salen en la web: `fn_inventario_publico` tiene una lista cerrada.
+
+## En vivo
+
+La pantalla escucha el aviso Realtime de `sql/16` (canal público «inventario-publico», sin
+datos) y vuelve a leer el inventario; también relee al volver a la pestaña. Separaciones,
+Contratos y Cobranza invalidan `['inventario']` tras escribir, así que lo que se separa en una
+pestaña se ve en la otra sin recargar.
 
 ## El precio de cada unidad
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ArrowLeft, Loader2, Paperclip } from 'lucide-react'
 import { CabeceraPantalla, MigajaVolver } from '@/componentes/marca/CabeceraPantalla'
 import { Button } from '@/componentes/ui/button'
@@ -65,6 +65,7 @@ import { AvisoDosRelojes, TarjetaReloj } from './RelojesSeparacion'
 export function FormularioSeparacion() {
   const { perfil } = useSesion()
   const navegar = useNavigate()
+  const clienteConsultas = useQueryClient()
 
   const [datos, setDatos] = useState<DatosSeparacion>(separacionEnBlanco)
   const [archivo, setArchivo] = useState<File | null>(null)
@@ -138,6 +139,10 @@ export function FormularioSeparacion() {
       setError({ motivo: resultado.motivo, campo: resultado.campo })
       return
     }
+    // sql/17: la base ya movió la unidad a «reservada temporal». Inventario (y la
+    // lista de unidades ofrecibles de este mismo formulario) deben releerse.
+    void clienteConsultas.invalidateQueries({ queryKey: ['inventario'] })
+    void clienteConsultas.invalidateQueries({ queryKey: ['separaciones'] })
     navegar(`/separaciones/${resultado.id}`)
   }
 

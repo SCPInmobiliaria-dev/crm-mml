@@ -708,6 +708,10 @@ begin
   r_u := coalesce(nullif(current_setting('mml.inventario_publico_tabla', true), ''), 'nada');
 
   v_paso := 'separaciones como comercial';
+  -- Desde sql/17 un comercial solo edita SUS separaciones sin verificar
+  -- (sep_editar_operativo): la de la prueba pasa a ser suya. Si 17 no está
+  -- aplicado, esto no cambia nada.
+  update separaciones set creado_por = v_com where id = v_sep;
   perform set_config('mml.inventario_publico_tabla', '', true);
   perform pg_temp.como(v_com);
   execute 'set local role authenticated';

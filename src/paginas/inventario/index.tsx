@@ -1,6 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Flag, Loader2, Lock, MapPinOff, Pencil, Plus, Search } from 'lucide-react'
+import {
+  AlertTriangle,
+  Flag,
+  Loader2,
+  Lock,
+  MapPinOff,
+  Pencil,
+  Plus,
+  Search,
+  UserRound,
+} from 'lucide-react'
 import { CabeceraPantalla, PestanaCabecera } from '@/componentes/marca/CabeceraPantalla'
 import { Button } from '@/componentes/ui/button'
 import { claseCampoCompacto } from '@/componentes/ui/input'
@@ -38,13 +48,16 @@ import {
   leerEstadoComercial,
   motivosNoOfrecible,
   puedeMantenerInventario,
+  separacionSinReflejar,
+  textoSituacion,
   resumirInventario,
   valoresDistintos,
   type FiltrosInventario,
   type Unidad,
 } from '@/lib/inventario'
+import { escucharCambiosInventario } from '@/lib/inventario-en-vivo'
 import { AsignarPrecio } from './AsignarPrecio'
-import { FormularioUnidad } from './FormularioUnidad'
+import { FormularioUnidad, type PestanaUnidad } from './FormularioUnidad'
 import { ImportarInventario } from './ImportarInventario'
 import { PlanoInventario, type ModoPlano } from './PlanoInventario'
 
@@ -101,8 +114,23 @@ export function PantallaInventario() {
   const { rol } = useSesion()
   const cliente = useQueryClient()
 
-  const consulta = useQuery({ queryKey: CLAVE, queryFn: cargarUnidades })
-  const titulares = useQuery({ queryKey: CLAVE_TITULARES, queryFn: cargarTitulares })
+  // Una separación, un contrato o un pago movidos por OTRA persona cambian el
+  // estado de las unidades: al volver a esta pestaña se vuelve a leer (el
+  // QueryClient del CRM no lo hace por defecto), y el aviso en vivo de abajo
+  // lo adelanta cuando el proyecto lo tiene.
+  // Respaldo del aviso en vivo: si Realtime no llega (nunca se ha visto llegar en
+  // producción, PENDIENTES-WEB I2), cada minuto se vuelve a leer igual que la web.
+  const consulta = useQuery({
+    queryKey: CLAVE,
+    queryFn: cargarUnidades,
+    refetchOnWindowFocus: true,
+    refetchInterval: 60_000,
+  })
+  const titulares = useQuery({
+    queryKey: CLAVE_TITULARES,
+    queryFn: cargarTitulares,
+    refetchOnWindowFocus: true,
+  })
   const corte = useQuery({
     queryKey: CLAVE_CORTE,
     queryFn: () => cargarParametrosPorId([PARAMETRO_CORTE_DISPONIBILIDAD]),
@@ -116,6 +144,13 @@ export function PantallaInventario() {
   const [seleccionada, setSeleccionada] = useState<string | null>(null)
   /** `undefined` = cerrado · `null` = alta · `Unidad` = edicion. */
   const [editando, setEditando] = useState<Unidad | null | undefined>(undefined)
+  /** Pestaña con la que se abre la edición (la ficha tiene un acceso directo a «Titular»). */
+  const [pestanaEdicion, setPestanaEdicion] = useState<PestanaUnidad>('datos')
+
+  function abrirEdicion(u: Unidad | null, pestana: PestanaUnidad = 'datos') {
+    setPestanaEdicion(pestana)
+    setEditando(u)
+  }
 
   const mantiene = puedeMantenerInventario(rol)
   const unidades = useMemo(() => consulta.data?.filas ?? [], [consulta.data])
@@ -146,6 +181,12 @@ export function PantallaInventario() {
     void cliente.invalidateQueries({ queryKey: ['inventario'] })
   }
 
+  // El aviso de la base (sql/16): algo que mueve la disponibilidad cambió.
+  useEffect(
+    () => escucharCambiosInventario(() => void cliente.invalidateQueries({ queryKey: ['inventario'] })),
+    [cliente],
+  )
+
   return (
     <div className="w-full">
       <CabeceraPantalla
@@ -156,7 +197,7 @@ export function PantallaInventario() {
              Esconderlo no protege nada — lo protege RLS. Evita ofrecer un
              formulario que iba a fallar al guardar. */
           mantiene ? (
-            <Button variant="ambar" onClick={() => setEditando(null)}>
+            <Button variant="ambar" onClick={() => abrirEdicion(null)}>
               <Plus strokeWidth={2} aria-hidden="true" />
               Nueva unidad
             </Button>
@@ -224,7 +265,7 @@ export function PantallaInventario() {
                 seleccionada={seleccionada}
                 alSeleccionar={setSeleccionada}
                 mantiene={mantiene}
-                alEditar={setEditando}
+                alEditar={(u) => abrirEdicion(u)}
                 conPlano={consulta.data?.conPlano ?? false}
               />
             </>
@@ -249,7 +290,7 @@ export function PantallaInventario() {
           titular={nombres.get(elegida.id) ?? null}
           precio={textoPrecioUnidad(elegida.precioParametro, nivelesPorId)}
           mantiene={mantiene}
-          alEditar={() => setEditando(elegida)}
+          alEditar={(pestana) => abrirEdicion(elegida, pestana)}
           alQuitar={() => setSeleccionada(null)}
         />
       )}
@@ -264,6 +305,7 @@ export function PantallaInventario() {
       {editando !== undefined && (
         <FormularioUnidad
           unidad={editando}
+          pestanaInicial={pestanaEdicion}
           cerrar={() => setEditando(undefined)}
           alGuardar={() => {
             setEditando(undefined)
@@ -478,7 +520,7 @@ function Leyenda() {
   return (
     <p className="mb-3 text-xs leading-relaxed text-suelo-500">
       <span className="font-bold text-suelo-700">Estado comercial</span> — ¿se puede ofrecer hoy?:
-      🟢 libre · 🟡 bloqueo temporal · ⚫ ya colocada · 🔴 fuera de venta.{' '}
+      🟢 libre · 🟡 bloqueo temporal (reservada o separada) · ⚫ vendida · 🔴 fuera de venta.{' '}
       <span className="font-bold text-suelo-700">Estado del dato</span> — 🟢 verificada contra
       plano · 🟡 por validar · 🔴 sin verificar · 🔵 propuesta · ⚫ histórico.
     </p>
@@ -726,7 +768,7 @@ function FichaUnidad({
   /** El nivel de precio al que apunta la unidad, ya en texto (src/lib/precios-unidad.ts). */
   precio: { precio: string; detalle: string }
   mantiene: boolean
-  alEditar: () => void
+  alEditar: (pestana: PestanaUnidad) => void
   alQuitar: () => void
 }) {
   const u = unidad
@@ -748,10 +790,13 @@ function FichaUnidad({
     ['Tipo', u.tipo ?? 'sin dato'],
     ['Área', u.areaM2 === null ? 'sin dato en el plano' : `${u.areaM2} m²`],
     ['Estado comercial', `${comercial.simbolo} ${comercial.etiqueta}`],
+    ['En el plano', textoSituacion(u)],
     ['Estado del dato', `${dato.simbolo} ${dato.etiqueta}`],
     ['Rubro', u.zonaRubro ?? 'sin rubro en el plano'],
     ['Precio de lista', precio.precio],
     ['Titular', titular ?? 'sin titular visible'],
+    ['Tipo de socio', u.tipoSocio ?? 'sin dato'],
+    ['Estado legal', u.estadoLegal ?? 'sin dato'],
     ['Ubicación', textoUbicacion(u)],
     ['Disponibilidad según', u.fuenteDisponibilidad ?? PENDIENTE],
     ['Plano', u.geometria === null ? 'sin ubicación en plano' : (u.fuentePlano ?? 'dibujada en el plano')],
@@ -772,10 +817,28 @@ function FichaUnidad({
         </p>
         <div className="flex flex-wrap gap-2">
           {mantiene && (
-            <Button variant="ambar" size="sm" className="h-11 sm:h-9" onClick={alEditar}>
-              <Pencil strokeWidth={1.75} aria-hidden="true" />
-              Editar
-            </Button>
+            <>
+              <Button
+                variant="ambar"
+                size="sm"
+                className="h-11 sm:h-9"
+                onClick={() => alEditar('datos')}
+              >
+                <Pencil strokeWidth={1.75} aria-hidden="true" />
+                Editar
+              </Button>
+              {/* El dueño y los papeles de CUALQUIER unidad, esté o no disponible:
+                  es el inventario maestro. */}
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-11 border-velo-borde bg-transparent text-cal hover:bg-azul-600 hover:text-cal sm:h-9"
+                onClick={() => alEditar('titular')}
+              >
+                <UserRound strokeWidth={1.75} aria-hidden="true" />
+                Titular y papeles
+              </Button>
+            </>
           )}
           <Button
             variant="ghost"
@@ -802,6 +865,15 @@ function FichaUnidad({
       {motivos.length > 0 && (
         <p className="mt-2 text-xs">
           <span className="font-bold">Por qué no se ofrece:</span> {motivos.join(' · ')}
+        </p>
+      )}
+
+      {separacionSinReflejar(u) && (
+        <p className="mt-2 text-xs">
+          <Flag className="mr-1 inline h-3 w-3 text-ambar" strokeWidth={2} aria-hidden="true" />
+          <span className="font-bold text-ambar">Separación viva:</span> el estado guardado dice
+          «{comercial.etiqueta}». El plano la pinta separada igual. Si sql/17 ya está aplicado, alguien
+          cambió el estado a mano encima de la separación: revísalo.
         </p>
       )}
 

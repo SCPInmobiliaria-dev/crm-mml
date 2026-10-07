@@ -261,14 +261,20 @@ export type SeparacionCompleta = {
   docClienteRegistrado: boolean
   notas: string | null
   creadoEl: string | null
+  /** Quién la registró (perfiles.id): un comercial solo puede anular las suyas sin verificar. */
+  creadoPor: string | null
+  /** Responsable de la oportunidad: también cuenta como «suya» (fn_cerrar_separacion). */
+  responsableId: string | null
+  /** Anulada = archivada (sql/17). Una separación archivada ya no está viva. */
+  archivadoEl: string | null
 }
 
 const COLUMNAS_COMPLETA =
   'id, oportunidad_id, persona_id, unidad_id, monto, monto_moneda, banco, nro_operacion, ' +
   'comprobante_url, fecha_deposito_efectivo, fecha_limite_devolucion, fecha_limite_precio, ' +
   'plazo_parametro, estado, verificada_por, verificada_el, doc_cliente_registrado, notas, ' +
-  'creado_el, personas(nombre_completo, telefono_e164, doc_tipo, doc_numero), ' +
-  'unidades(codigo_unidad)'
+  'creado_el, creado_por, archivado_el, personas(nombre_completo, telefono_e164, doc_tipo, doc_numero), ' +
+  'unidades(codigo_unidad), oportunidades(responsable_id)'
 
 function relacionada(valor: unknown): Record<string, unknown> | null {
   return typeof valor === 'object' && valor !== null && !Array.isArray(valor)
@@ -288,6 +294,7 @@ function interpretarCompleta(fila: unknown): SeparacionCompleta | null {
 
   const persona = relacionada(f['personas'])
   const unidad = relacionada(f['unidades'])
+  const oportunidad = relacionada(f['oportunidades'])
 
   return {
     id,
@@ -314,6 +321,9 @@ function interpretarCompleta(fila: unknown): SeparacionCompleta | null {
     docClienteRegistrado: f['doc_cliente_registrado'] === true,
     notas: texto(f['notas']),
     creadoEl: texto(f['creado_el']),
+    creadoPor: texto(f['creado_por']),
+    responsableId: oportunidad === null ? null : texto(oportunidad['responsable_id']),
+    archivadoEl: texto(f['archivado_el']),
   }
 }
 
@@ -399,6 +409,97 @@ export async function verificarSeparacion(id: string): Promise<ResultadoAccion> 
     }
   }
 
+  return { ok: true }
+}
+
+// ---------------------------------------------------------------------------
+// Cerrar una separación (sql/17 · fn_cerrar_separacion)
+// ---------------------------------------------------------------------------
+
+/**
+ * Las tres formas de cerrar una separación viva. Antes de sql/17 ninguna se
+ * podía hacer desde el CRM: la separación se quedaba «viva» para siempre y,
+ * con el estado de la unidad siguiendo a la separación, la unidad también.
+ *
+ * CUÁNDO vence una separación no lo decide el CRM: «qué pasa al día 8» no
+ * tiene regla escrita (00-fuente-de-verdad\separacion-vigente.md §3.3, decide
+ * Walter). Por eso «vencida» la marca una persona, con su motivo.
+ */
+export const ACCIONES_CIERRE = [
+  {
+    valor: 'devolver',
+    etiqueta: 'Devolver',
+    explicacion: 'Se le devolvió el dinero al cliente. Queda «devuelta» con la fecha.',
+  },
+  {
+    valor: 'vencer',
+    etiqueta: 'Marcar vencida',
+    explicacion: 'Pasó el plazo sin contrato y se decidió darla por vencida.',
+  },
+  {
+    valor: 'anular',
+    etiqueta: 'Anular (prueba o error)',
+    explicacion: 'No fue una separación real: se archiva con el motivo. Nada se borra.',
+  },
+] as const
+
+export type AccionCierre = (typeof ACCIONES_CIERRE)[number]['valor']
+
+/** Quién puede cada acción — COPIA de fn_cerrar_separacion (sql/17); quien decide es la base. */
+export function accionesPermitidas(
+  rol: string | null,
+  s: { verificada: boolean; esPropia: boolean },
+): AccionCierre[] {
+  if (rol === 'direccion' || rol === 'administracion') return ['devolver', 'vencer', 'anular']
+  if (rol === 'comercial' && !s.verificada && s.esPropia) return ['anular']
+  return []
+}
+
+function motivoDeRpc(mensaje: string): string {
+  const m = mensaje.toLowerCase()
+  if (m.includes('could not find the function') || m.includes('schema cache')) {
+    return 'Falta aplicar sql/17-inventario-maestro.sql en Supabase: sin él no se puede cerrar una separación desde el CRM.'
+  }
+  return mensajeDeError(mensaje)
+}
+
+/** Devuelve, vence o anula una separación viva. La unidad vuelve sola a su estado anterior (sql/17). */
+export async function cerrarSeparacion(
+  id: string,
+  accion: AccionCierre,
+  motivo: string,
+  /** Solo para «devolver»: 'aaaa-mm-dd'. Vacío = hoy (hora de Lima, lo pone la base). */
+  fecha: string,
+): Promise<ResultadoAccion> {
+  if (motivo.trim() === '') {
+    return { ok: false, motivo: 'Escribe por qué se cierra: queda registrado.' }
+  }
+  const { data, error } = await supabase.rpc('fn_cerrar_separacion', {
+    p_separacion_id: id,
+    p_accion: accion,
+    p_motivo: motivo.trim(),
+    p_fecha: accion === 'devolver' && fecha.trim() !== '' ? fecha.trim() : null,
+  })
+  if (error !== null) return { ok: false, motivo: motivoDeRpc(error.message) }
+  const r = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : null
+  if (r === null || r['ok'] !== true) {
+    return { ok: false, motivo: 'La base respondió algo que no se pudo leer (fn_cerrar_separacion).' }
+  }
+  return { ok: true }
+}
+
+/**
+ * Marca «documento del cliente registrado» después de crear la separación (R3
+ * lo exige para la constancia). La base solo lo acepta si la ficha de la
+ * persona ya tiene su documento.
+ */
+export async function registrarDocCliente(id: string): Promise<ResultadoAccion> {
+  const { data, error } = await supabase.rpc('fn_registrar_doc_cliente', { p_separacion_id: id })
+  if (error !== null) return { ok: false, motivo: motivoDeRpc(error.message) }
+  const r = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : null
+  if (r === null || r['ok'] !== true) {
+    return { ok: false, motivo: 'La base respondió algo que no se pudo leer (fn_registrar_doc_cliente).' }
+  }
   return { ok: true }
 }
 

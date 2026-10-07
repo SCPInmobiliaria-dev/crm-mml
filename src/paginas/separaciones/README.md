@@ -14,6 +14,7 @@ casi nada de lo que decide se decide aquí.
 | `FichaSeparacion.tsx` | **Ficha** de una separación: verificar y emitir constancia · `/separaciones/:id` |
 | `Constancia.tsx` | **Vista imprimible** en HTML · `/separaciones/:id/constancia` |
 | `RelojesSeparacion.tsx` | Las piezas de los dos relojes, compartidas por las tres pantallas |
+| `CerrarSeparacion.tsx` | 🟡 (necesita `sql/17`) **Cerrar** una separación viva —devolver, marcar vencida o anular, siempre con motivo— y marcar el documento del cliente si se olvidó al crearla |
 
 La lógica de datos vive en `src/lib/separaciones.ts` y `src/lib/parametros.ts`, no aquí.
 
@@ -47,6 +48,26 @@ bandeja**: su resultado no se enseña en ningún sitio.
 
 Los días restantes los resta `v_separaciones_vigilancia` contra la fecha del servidor. No se
 recalculan en el navegador, para que el número de la bandeja y el de la ficha sean el mismo.
+
+## Cerrar una separación (sql/17)
+
+Hasta el 7 de octubre de 2026 la pantalla solo creaba y verificaba: una separación de prueba o mal
+cargada se quedaba viva para siempre, con su unidad bloqueada, y solo se cerraba por SQL. Ahora la
+ficha tiene «Cerrar esta separación», que llama a `fn_cerrar_separacion`:
+
+| Acción | Qué deja | Quién (🔵 propuesta, la decide la base) |
+|---|---|---|
+| Devolver | `devuelta` + fecha (hoy si no se da) + motivo | Dirección, Administración |
+| Marcar vencida | `vencida` + motivo en las notas | Dirección, Administración |
+| Anular (prueba o error) | archivada + motivo en las notas — nada se borra (R8) | Dirección, Administración; un comercial, solo una SUYA sin verificar |
+
+- La unidad vuelve sola al estado que tenía (`sql/17`) y la web se entera por el aviso del inventario.
+- **Un reloj vencido no cierra nada.** Qué pasa «al día 8» si no se firma contrato no tiene regla
+  escrita (`00-fuente-de-verdad/separacion-vigente.md` §3.3, decide Walter); «vencida» la marca una
+  persona, con su motivo.
+- Al crear el contrato con su separación, la base la pasa sola a `aplicada_a_contrato`.
+- Si al crearla no se marcó «documento del cliente registrado», la constancia quedaba bloqueada para
+  siempre: ahora se marca después (`fn_registrar_doc_cliente`), si la ficha ya tiene el documento.
 
 ## La constancia
 

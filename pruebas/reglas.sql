@@ -103,9 +103,13 @@ $$;
 -- ---------------------------------------------------------------------
 create temporary table fixture (clave text primary key, id uuid) on commit drop;
 
-insert into unidades (codigo_unidad, tipo, estado_comercial, estado_dato)
-values ('PRUEBA-U1', 'puesto', 'disponible', 'verde'),
-       ('PRUEBA-U2', 'puesto', 'disponible', 'verde');
+/* `fuente_plano` lo exige `verde_exige_plano` (08 §3) para toda unidad
+   'verde'. Sin él la preparación revienta antes de la primera prueba.
+   'PRUEBA plano' es una ficha de juguete, como los montos: no nombra ningún
+   plano real y no persiste. */
+insert into unidades (codigo_unidad, tipo, estado_comercial, estado_dato, fuente_plano)
+values ('PRUEBA-U1', 'puesto', 'disponible', 'verde', 'PRUEBA plano'),
+       ('PRUEBA-U2', 'puesto', 'disponible', 'verde', 'PRUEBA plano');
 
 insert into personas (nombre_completo, telefono_e164)
 values ('PRUEBA Ana',  '+51900000001'),
