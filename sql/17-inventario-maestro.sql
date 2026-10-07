@@ -491,6 +491,30 @@ end $fn$;
 comment on function fn_registrar_doc_cliente is
   'Marca doc_cliente_registrado cuando la ficha de la persona ya tiene su documento. Antes solo se podia al crear la separacion.';
 
+-- R2 · La política de 02 dejaba a comercial y administración editar CUALQUIER
+-- separación (USING sin condición sobre la fila) siempre que la fila NUEVA
+-- quedara sin verificar: un comercial podía editar la de otro vendedor y hasta
+-- DESHACER la verificación de Walter poniendo verificada_el a null (auditoría
+-- del 07/10/2026). Ahora la fila de ANTES también tiene que estar sin
+-- verificar, y un comercial solo toca las suyas (las registró él o lleva su
+-- oportunidad). Una verificada solo la edita Dirección (sep_editar_direccion).
+drop policy if exists sep_editar_operativo on separaciones;
+create policy sep_editar_operativo on separaciones for update to authenticated
+  using (verificada_el is null
+         and (coalesce(es(array['administracion']::rol_usuario[]), false)
+              or (coalesce(es(array['comercial']::rol_usuario[]), false)
+                  and (creado_por = auth.uid()
+                       or exists (select 1 from oportunidades o
+                                   where o.id = separaciones.oportunidad_id
+                                     and o.responsable_id = auth.uid())))))
+  with check (verificada_el is null
+              and (coalesce(es(array['administracion']::rol_usuario[]), false)
+                   or (coalesce(es(array['comercial']::rol_usuario[]), false)
+                       and (creado_por = auth.uid()
+                            or exists (select 1 from oportunidades o
+                                        where o.id = separaciones.oportunidad_id
+                                          and o.responsable_id = auth.uid())))));
+
 revoke all on function fn_cerrar_separacion(uuid, text, text, date) from public, anon;
 revoke all on function fn_registrar_doc_cliente(uuid) from public, anon;
 grant execute on function fn_cerrar_separacion(uuid, text, text, date) to authenticated;

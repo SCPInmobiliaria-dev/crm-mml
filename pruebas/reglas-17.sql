@@ -909,6 +909,49 @@ exception when others then
   perform pg_temp.anotar('CIERRE', 'Registrar el documento del cliente', 'sin error', sqlerrm, false);
 end $$;
 
+-- 6f · R2 con RLS de verdad: un comercial no deshace la verificación de Walter
+-- ni edita la separación de otro vendedor; la suya sin verificar, sí.
+do $$
+declare v_dir uuid := pg_temp.f('direccion'); v_com uuid := pg_temp.f('comercial');
+        v_ver uuid; v_ajena uuid; v_suya uuid; v_op uuid; n_ver integer; n_ajena integer; n_suya integer; v_sigue timestamptz;
+begin
+  insert into unidades (codigo_unidad, tipo, estado_comercial, estado_dato, fuente_plano) values
+    ('PRUEBA17-RLS1', 'puesto', 'disponible', 'verde', 'PRUEBA17 plano'),
+    ('PRUEBA17-RLS2', 'puesto', 'disponible', 'verde', 'PRUEBA17 plano'),
+    ('PRUEBA17-RLS3', 'puesto', 'disponible', 'verde', 'PRUEBA17 plano');
+  insert into oportunidades (persona_id, responsable_id) values (pg_temp.f('per'), v_com) returning id into v_op;
+  insert into separaciones (oportunidad_id, persona_id, unidad_id, monto, monto_moneda, creado_por)
+  select v_op, pg_temp.f('per'), id, 0, 'PEN', v_com from unidades where codigo_unidad = 'PRUEBA17-RLS1' returning id into v_ver;
+  insert into oportunidades (persona_id, responsable_id) values (pg_temp.f('per'), v_dir) returning id into v_op;
+  insert into separaciones (oportunidad_id, persona_id, unidad_id, monto, monto_moneda, creado_por)
+  select v_op, pg_temp.f('per'), id, 0, 'PEN', v_dir from unidades where codigo_unidad = 'PRUEBA17-RLS2' returning id into v_ajena;
+  insert into oportunidades (persona_id, responsable_id) values (pg_temp.f('per'), v_com) returning id into v_op;
+  insert into separaciones (oportunidad_id, persona_id, unidad_id, monto, monto_moneda, creado_por)
+  select v_op, pg_temp.f('per'), id, 0, 'PEN', v_com from unidades where codigo_unidad = 'PRUEBA17-RLS3' returning id into v_suya;
+  perform pg_temp.como(v_dir);
+  update separaciones set estado = 'verificada', verificada_por = v_dir, verificada_el = now() where id = v_ver;
+
+  perform pg_temp.como(v_com);
+  execute 'set local role authenticated';
+  update separaciones set verificada_el = null, verificada_por = null, estado = 'pendiente_verificacion' where id = v_ver;
+  get diagnostics n_ver = row_count;
+  update separaciones set notas = 'PRUEBA17 ajena' where id = v_ajena;
+  get diagnostics n_ajena = row_count;
+  update separaciones set notas = 'PRUEBA17 suya' where id = v_suya;
+  get diagnostics n_suya = row_count;
+  execute 'reset role';
+  perform pg_temp.como(null);
+  select verificada_el into v_sigue from separaciones where id = v_ver;
+  perform pg_temp.anotar('CIERRE', 'R2 con RLS: un comercial no deshace la verificación de Walter ni edita la separación de otro vendedor; la suya sin verificar sí',
+    'deshacer 0 filas (sigue verificada) · ajena 0 filas · suya 1 fila',
+    format('deshacer %s filas (verificada %s) · ajena %s · suya %s', n_ver, v_sigue is not null, n_ajena, n_suya),
+    n_ver = 0 and v_sigue is not null and n_ajena = 0 and n_suya = 1);
+exception when others then
+  execute 'reset role';
+  perform pg_temp.como(null);
+  perform pg_temp.anotar('CIERRE', 'R2 con RLS en separaciones', 'sin error', sqlerrm, false);
+end $$;
+
 -- @@FIN_CUERPO
 
 
