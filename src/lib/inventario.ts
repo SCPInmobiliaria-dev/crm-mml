@@ -191,7 +191,7 @@ export function leerEstadoComercial(valor: string): { etiqueta: string; simbolo:
  *
  *   separada    hay una separación viva, o una oportunidad activa la tiene
  *               asignada, o el estado guardado es reservada_temporal/separada
- *   vendida     contratada, pagada o entregada
+ *   vendida     contratada, pagada o entregada, o con un contrato vivo
  *   no_disponible  retirada de venta (el estado lo puso una persona)
  *   disponible  el estado guardado dice disponible y nada la está tomando
  *
@@ -217,6 +217,9 @@ export const SITUACIONES_PLANO: readonly { valor: SituacionPlano; etiqueta: stri
 
 export function situacionEnPlano(u: Unidad): SituacionPlano {
   const e = u.estadoComercial
+  // Un contrato vivo manda sobre todo: la unidad está vendida aunque el estado
+  // guardado diga otra cosa (y desde sql/17 ya no se ofrece).
+  if (u.tieneContratoVivo === true) return 'vendida'
   if (u.tieneSeparacionViva === true || e === 'reservada_temporal' || e === 'separada') return 'separada'
   if (e === 'contratada' || e === 'pagada' || e === 'entregada') return 'vendida'
   if (e === 'no_disponible') return 'no_disponible'
@@ -292,6 +295,10 @@ export type Unidad = {
   revisar: string | null
   /** De donde sale el estado comercial de la fila, con su fecha. */
   fuenteDisponibilidad: string | null
+
+  // --- Desde sql/17-inventario-maestro.sql (null si la migracion no esta) ---
+  /** Hay un contrato sin archivar sobre la unidad: se pinta «vendida» aunque el estado guardado diga otra cosa. */
+  tieneContratoVivo: boolean | null
 }
 
 /** Un vertice del poligono, en coordenadas de DIBUJO (pixeles), no metros. */
@@ -367,6 +374,7 @@ function interpretarUnidad(fila: unknown): Unidad | null {
     zonaRubro: texto(f['zona_rubro']),
     revisar: texto(f['revisar']),
     fuenteDisponibilidad: texto(f['fuente_disponibilidad']),
+    tieneContratoVivo: booleano(f['tiene_contrato_vivo']),
   }
 }
 
@@ -459,17 +467,23 @@ function faltaColumna(error: { code?: string; message: string }): boolean {
   return error.code === '42703' || /column .* does not exist/i.test(error.message)
 }
 
-export async function cargarUnidades(): Promise<LoteInventario> {
-  const completa = await supabase
-    .from('v_unidades_tablero')
-    .select(`${COLUMNAS_UNIDAD}, ${COLUMNAS_PLANO}`)
-    .order('codigo_unidad', { ascending: true })
-    .limit(LIMITE_UNIDADES)
+/** La columna que añade sql/17 al FINAL de v_unidades_tablero. */
+const COLUMNAS_17 = 'tiene_contrato_vivo'
 
-  if (completa.error === null) {
-    return { ...leerLote(completa.data, interpretarUnidad), conPlano: true }
+export async function cargarUnidades(): Promise<LoteInventario> {
+  // Por capas: con lo de 17, sin lo de 17 (antes de aplicarlo) y sin lo de 14.
+  // Que falte 17 no puede costar el plano entero: se relee sin esa columna.
+  for (const columnas of [`${COLUMNAS_UNIDAD}, ${COLUMNAS_PLANO}, ${COLUMNAS_17}`, `${COLUMNAS_UNIDAD}, ${COLUMNAS_PLANO}`]) {
+    const intento = await supabase
+      .from('v_unidades_tablero')
+      .select(columnas)
+      .order('codigo_unidad', { ascending: true })
+      .limit(LIMITE_UNIDADES)
+    if (intento.error === null) {
+      return { ...leerLote(intento.data, interpretarUnidad), conPlano: true }
+    }
+    if (!faltaColumna(intento.error)) throw new Error(mensajeDeError(intento.error.message))
   }
-  if (!faltaColumna(completa.error)) throw new Error(mensajeDeError(completa.error.message))
 
   const basica = await supabase
     .from('v_unidades_tablero')

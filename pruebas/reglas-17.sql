@@ -740,6 +740,175 @@ exception when others then
 end $$;
 
 
+-- ---------------------------------------------------------------------
+-- 6 · CIERRE · el contrato se queda con la separación; cerrar una separación
+-- ---------------------------------------------------------------------
+
+-- 6a · Al crear el contrato con su separación, la separación pasa SOLA a
+-- aplicada_a_contrato (deja de estar viva) y la unidad queda contratada.
+do $$
+declare v_sep uuid; v_dir uuid := pg_temp.f('direccion'); v_u uuid; v_est text; v_viva boolean; v_uni text;
+begin
+  insert into unidades (codigo_unidad, tipo, estado_comercial, estado_dato, fuente_plano)
+  values ('PRUEBA17-CON', 'puesto', 'disponible', 'verde', 'PRUEBA17 plano') returning id into v_u;
+  v_sep := pg_temp.separar('PRUEBA17-CON');
+  perform pg_temp.como(v_dir);
+  update separaciones set estado = 'verificada', verificada_por = v_dir, verificada_el = now() where id = v_sep;
+  perform pg_temp.como(null);
+  insert into contratos (persona_id, unidad_id, separacion_id, precio_total, precio_moneda)
+  values (pg_temp.f('per'), v_u, v_sep, 0, 'PEN');
+  select estado::text into v_est from separaciones where id = v_sep;
+  select tiene_separacion_viva into v_viva from v_unidades_tablero where id = v_u;
+  v_uni := pg_temp.estado('PRUEBA17-CON');
+  perform pg_temp.anotar('CIERRE', 'Crear el contrato con su separación la pasa sola a aplicada_a_contrato (ya no viva) y deja la unidad contratada',
+    'aplicada_a_contrato · sin separación viva · contratada/disponible',
+    concat_ws(' · ', v_est, 'viva ' || v_viva, v_uni),
+    v_est = 'aplicada_a_contrato' and v_viva = false and v_uni = 'contratada/disponible');
+exception when others then
+  perform pg_temp.como(null);
+  perform pg_temp.anotar('CIERRE', 'Crear el contrato con su separación', 'sin error', sqlerrm, false);
+end $$;
+
+-- 6b · Una unidad con contrato vivo nunca es ofrecible, aunque alguien deje su
+-- estado guardado en 'disponible'; el tablero lo dice y la web no la ofrece.
+do $$
+declare v_u uuid; v_ofr boolean; v_tc boolean; v_web text;
+begin
+  insert into unidades (codigo_unidad, tipo, estado_comercial, estado_dato, fuente_plano, area_m2)
+  values ('PRUEBA17-OFR', 'puesto', 'disponible', 'verde', 'PRUEBA17 plano', 1) returning id into v_u;
+  insert into contratos (persona_id, unidad_id, precio_total, precio_moneda)
+  values (pg_temp.f('per'), v_u, 0, 'PEN');
+  update unidades set estado_comercial = 'disponible' where id = v_u;   -- a mano, contra los hechos
+  select ofrecible, tiene_contrato_vivo into v_ofr, v_tc from v_unidades_tablero where id = v_u;
+  v_web := pg_temp.estado_web('PRUEBA17-OFR');
+  perform pg_temp.anotar('CIERRE', 'Con contrato vivo una unidad nunca es ofrecible (aunque su estado diga disponible); el tablero lo marca y la web no la ofrece',
+    'ofrecible false · tiene_contrato_vivo true · web ≠ disponible',
+    concat_ws(' · ', 'ofrecible ' || v_ofr, 'contrato ' || v_tc, 'web ' || coalesce(v_web, 'sin función')),
+    v_ofr = false and v_tc = true and coalesce(v_web, 'x') <> 'disponible');
+exception when others then
+  perform pg_temp.anotar('CIERRE', 'Con contrato vivo nunca es ofrecible', 'sin error', sqlerrm, false);
+end $$;
+
+-- 6c · R3: no hay constancia de una separación archivada.
+do $$
+declare v_sep uuid; v_dir uuid := pg_temp.f('direccion'); v_antes boolean; v_despues boolean;
+begin
+  insert into unidades (codigo_unidad, tipo, estado_comercial, estado_dato, fuente_plano)
+  values ('PRUEBA17-R3', 'puesto', 'disponible', 'verde', 'PRUEBA17 plano');
+  v_sep := pg_temp.separar('PRUEBA17-R3');
+  perform pg_temp.como(v_dir);
+  update separaciones set estado = 'verificada', verificada_por = v_dir, verificada_el = now(),
+         doc_cliente_registrado = true where id = v_sep;
+  perform pg_temp.como(null);
+  v_antes := puede_emitir_constancia(v_sep);
+  update separaciones set archivado_el = now() where id = v_sep;
+  v_despues := puede_emitir_constancia(v_sep);
+  perform pg_temp.anotar('CIERRE', 'R3: una separación verificada con documento puede emitir constancia; archivada, ya no',
+    'antes true · archivada false', 'antes ' || v_antes || ' · archivada ' || v_despues, v_antes and not v_despues);
+exception when others then
+  perform pg_temp.como(null);
+  perform pg_temp.anotar('CIERRE', 'R3 con separación archivada', 'sin error', sqlerrm, false);
+end $$;
+
+-- 6d · fn_cerrar_separacion, con la sesión de la app: quién puede qué.
+do $$
+declare v_dir uuid := pg_temp.f('direccion'); v_adm uuid := pg_temp.f('administracion'); v_com uuid := pg_temp.f('comercial');
+        v_s1 uuid; v_s2 uuid; v_s3 uuid; v_s4 uuid; v_op uuid;
+        m_dev text := 'se aceptó'; m_ajena text := 'se aceptó'; m_sin text := 'se aceptó'; m_fut text := 'se aceptó'; m_doble text := 'se aceptó';
+        e1 text; e2 text; e3 text; e4 text; u1 text; u3 text; v_fecha date;
+begin
+  insert into unidades (codigo_unidad, tipo, estado_comercial, estado_dato, fuente_plano) values
+    ('PRUEBA17-C1', 'puesto', 'disponible', 'verde', 'PRUEBA17 plano'),
+    ('PRUEBA17-C2', 'puesto', 'disponible', 'verde', 'PRUEBA17 plano'),
+    ('PRUEBA17-C3', 'puesto', 'disponible', 'verde', 'PRUEBA17 plano'),
+    ('PRUEBA17-C4', 'puesto', 'disponible', 'verde', 'PRUEBA17 plano');
+  -- C1: la registró el comercial y está verificada · C2: la registró el comercial, sin verificar
+  -- C3: la registró Dirección, sin verificar (ajena para el comercial) · C4: para «vencer»
+  insert into oportunidades (persona_id, responsable_id) values (pg_temp.f('per'), v_com) returning id into v_op;
+  insert into separaciones (oportunidad_id, persona_id, unidad_id, monto, monto_moneda, creado_por)
+  select v_op, pg_temp.f('per'), id, 0, 'PEN', v_com from unidades where codigo_unidad = 'PRUEBA17-C1' returning id into v_s1;
+  insert into oportunidades (persona_id, responsable_id) values (pg_temp.f('per'), v_com) returning id into v_op;
+  insert into separaciones (oportunidad_id, persona_id, unidad_id, monto, monto_moneda, creado_por)
+  select v_op, pg_temp.f('per'), id, 0, 'PEN', v_com from unidades where codigo_unidad = 'PRUEBA17-C2' returning id into v_s2;
+  insert into oportunidades (persona_id, responsable_id) values (pg_temp.f('per'), v_dir) returning id into v_op;
+  insert into separaciones (oportunidad_id, persona_id, unidad_id, monto, monto_moneda, creado_por)
+  select v_op, pg_temp.f('per'), id, 0, 'PEN', v_dir from unidades where codigo_unidad = 'PRUEBA17-C3' returning id into v_s3;
+  v_s4 := pg_temp.separar('PRUEBA17-C4');
+  perform pg_temp.como(v_dir);
+  update separaciones set estado = 'verificada', verificada_por = v_dir, verificada_el = now() where id = v_s1;
+
+  -- El comercial: no puede devolver la suya verificada, ni anular la ajena; sí anular la suya sin verificar.
+  perform pg_temp.como(v_com);
+  execute 'set local role authenticated';
+  begin perform fn_cerrar_separacion(v_s1, 'devolver', 'PRUEBA17', null); exception when others then m_dev := sqlerrm; end;
+  begin perform fn_cerrar_separacion(v_s3, 'anular', 'PRUEBA17', null); exception when others then m_ajena := sqlerrm; end;
+  perform fn_cerrar_separacion(v_s2, 'anular', 'PRUEBA17 cargada por error', null);
+  begin perform fn_cerrar_separacion(v_s3, 'anular', '   ', null); exception when others then m_sin := sqlerrm; end;
+  execute 'reset role';
+
+  -- Administración devuelve la verificada (fecha de hoy por defecto); Dirección vence la C4.
+  perform pg_temp.como(v_adm);
+  execute 'set local role authenticated';
+  begin perform fn_cerrar_separacion(v_s1, 'devolver', 'PRUEBA17', current_date + 5); exception when others then m_fut := sqlerrm; end;
+  perform fn_cerrar_separacion(v_s1, 'devolver', 'PRUEBA17 devuelto al cliente', null);
+  begin perform fn_cerrar_separacion(v_s1, 'devolver', 'PRUEBA17', null); exception when others then m_doble := sqlerrm; end;
+  execute 'reset role';
+  perform pg_temp.como(v_dir);
+  execute 'set local role authenticated';
+  perform fn_cerrar_separacion(v_s4, 'vencer', 'PRUEBA17 no firmó', null);
+  execute 'reset role';
+  perform pg_temp.como(null);
+
+  select estado::text || case when archivado_el is null then '' else '+archivada' end, devuelta_el into e1, v_fecha from separaciones where id = v_s1;
+  select estado::text || case when archivado_el is null then '' else '+archivada' end into e2 from separaciones where id = v_s2;
+  select estado::text || case when archivado_el is null then '' else '+archivada' end into e3 from separaciones where id = v_s3;
+  select estado::text || case when archivado_el is null then '' else '+archivada' end into e4 from separaciones where id = v_s4;
+  u1 := pg_temp.estado('PRUEBA17-C1');
+  u3 := pg_temp.estado('PRUEBA17-C3');
+  perform pg_temp.anotar('CIERRE', 'fn_cerrar_separacion: el comercial solo anula una SUYA sin verificar; Administración devuelve (no fecha futura, no dos veces); Dirección vence; la unidad vuelve a disponible',
+    'comercial rechazado al devolver y en la ajena · C2 anulada · sin motivo rechazado · C1 devuelta hoy y unidad disponible/— · C4 vencida · C3 sigue viva',
+    concat_ws(' | ', left(m_dev, 40), left(m_ajena, 40), 'C2 ' || e2, left(m_sin, 30), left(m_fut, 30), 'C1 ' || e1 || ' ' || v_fecha, u1, left(m_doble, 30), 'C4 ' || e4, 'C3 ' || e3 || ' ' || u3),
+    strpos(m_dev, 'Solo Dirección o Administración') > 0 and strpos(m_ajena, 'Solo Dirección o Administración') > 0
+      and e2 = 'pendiente_verificacion+archivada' and strpos(m_sin, 'hay que decir por qué') > 0
+      and strpos(m_fut, 'no puede ser futura') > 0 and e1 = 'devuelta' and v_fecha = (now() at time zone 'America/Lima')::date
+      and u1 = 'disponible/—' and strpos(m_doble, 'ya no está viva') > 0 and e4 = 'vencida'
+      and e3 = 'pendiente_verificacion' and u3 = 'reservada_temporal/disponible');
+exception when others then
+  execute 'reset role';
+  perform pg_temp.como(null);
+  perform pg_temp.anotar('CIERRE', 'fn_cerrar_separacion por rol', 'sin error', sqlerrm, false);
+end $$;
+
+-- 6e · Registrar el documento del cliente después de crear la separación
+-- (antes solo se podía al crearla): sin DNI en la ficha se rechaza; con DNI, sí.
+do $$
+declare v_sep uuid; v_per uuid; v_op uuid; v_com uuid := pg_temp.f('comercial'); m text := 'se aceptó'; v_ok boolean;
+begin
+  insert into unidades (codigo_unidad, tipo, estado_comercial, estado_dato, fuente_plano)
+  values ('PRUEBA17-DOCC', 'puesto', 'disponible', 'verde', 'PRUEBA17 plano');
+  insert into personas (nombre_completo, telefono_e164) values ('PRUEBA17 Sin DNI', '+51900170201') returning id into v_per;
+  insert into oportunidades (persona_id) values (v_per) returning id into v_op;
+  insert into separaciones (oportunidad_id, persona_id, unidad_id, monto, monto_moneda)
+  select v_op, v_per, id, 0, 'PEN' from unidades where codigo_unidad = 'PRUEBA17-DOCC' returning id into v_sep;
+  perform pg_temp.como(v_com);
+  execute 'set local role authenticated';
+  begin perform fn_registrar_doc_cliente(v_sep); exception when others then m := sqlerrm; end;
+  execute 'reset role';
+  update personas set doc_tipo = 'DNI', doc_numero = 'PRUEBA17-DOC-9' where id = v_per;
+  execute 'set local role authenticated';
+  perform fn_registrar_doc_cliente(v_sep);
+  execute 'reset role';
+  perform pg_temp.como(null);
+  select doc_cliente_registrado into v_ok from separaciones where id = v_sep;
+  perform pg_temp.anotar('CIERRE', 'El documento del cliente se puede registrar después de crear la separación, solo si la ficha ya tiene su DNI',
+    'sin DNI rechazado · con DNI registrado', left(m, 60) || ' · registrado ' || v_ok,
+    strpos(m, 'todavía no tiene su documento') > 0 and v_ok);
+exception when others then
+  execute 'reset role';
+  perform pg_temp.como(null);
+  perform pg_temp.anotar('CIERRE', 'Registrar el documento del cliente', 'sin error', sqlerrm, false);
+end $$;
+
 -- @@FIN_CUERPO
 
 

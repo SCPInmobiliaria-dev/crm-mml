@@ -118,7 +118,14 @@ export function PantallaInventario() {
   // estado de las unidades: al volver a esta pestaña se vuelve a leer (el
   // QueryClient del CRM no lo hace por defecto), y el aviso en vivo de abajo
   // lo adelanta cuando el proyecto lo tiene.
-  const consulta = useQuery({ queryKey: CLAVE, queryFn: cargarUnidades, refetchOnWindowFocus: true })
+  // Respaldo del aviso en vivo: si Realtime no llega (nunca se ha visto llegar en
+  // producción, PENDIENTES-WEB I2), cada minuto se vuelve a leer igual que la web.
+  const consulta = useQuery({
+    queryKey: CLAVE,
+    queryFn: cargarUnidades,
+    refetchOnWindowFocus: true,
+    refetchInterval: 60_000,
+  })
   const titulares = useQuery({
     queryKey: CLAVE_TITULARES,
     queryFn: cargarTitulares,

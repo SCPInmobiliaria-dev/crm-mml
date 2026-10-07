@@ -151,7 +151,7 @@ export function FormularioContrato() {
       ...previo,
       oportunidadId: o.id,
       personaId: o.personaId,
-      unidadId: o.unidadAsignadaId ?? '',
+      unidadId: o.unidadId ?? '',
       separacionId: o.separacionId ?? '',
       // Solo se propone lo que el parámetro permite proponer. Si está en rojo,
       // la casilla se queda vacía a propósito.
@@ -569,10 +569,14 @@ function ResumenOportunidad({ oportunidad }: { oportunidad: OportunidadContratab
       <Dato
         titulo="Unidad"
         valor={
-          o.codigoUnidad ?? (
+          o.codigoUnidad === null ? (
             <span className="font-bold text-alerta">
-              🔴 sin unidad asignada — y el contrato la exige
+              🔴 sin unidad: ni asignada ni en una separación viva — y el contrato la exige
             </span>
+          ) : o.unidadDeLaSeparacion ? (
+            `${o.codigoUnidad} (la de su separación)`
+          ) : (
+            o.codigoUnidad
           )
         }
       />

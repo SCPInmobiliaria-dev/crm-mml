@@ -28,6 +28,7 @@ import {
   type SeparacionVigilada,
 } from '@/lib/separaciones'
 import { AvisoDosRelojes, TarjetaReloj, ValorReloj } from './RelojesSeparacion'
+import { CerrarSeparacion, RegistrarDocumentoCliente } from './CerrarSeparacion'
 
 /**
  * FICHA DE UNA SEPARACIÓN — donde se verifica y donde se bloquea la constancia.
@@ -133,7 +134,9 @@ export function FichaSeparacion() {
         descripcion={`Registrada el ${fechaHora(s.creadoEl)}`}
         distintivos={
           <>
-            <Badge variant="cal">{etiquetaEstadoSeparacion(s.estado)}</Badge>
+            <Badge variant="cal">
+              {s.archivadoEl === null ? etiquetaEstadoSeparacion(s.estado) : 'Anulada (archivada)'}
+            </Badge>
             <Badge variant="outlineCal">
               {s.codigoUnidad === null ? 'Sin unidad asignada' : `Unidad ${s.codigoUnidad}`}
             </Badge>
@@ -158,6 +161,8 @@ export function FichaSeparacion() {
           puedeEmitir={constancia.data === true}
           consultando={constancia.isPending}
         />
+
+        <CerrarSeparacion separacion={s} />
       </div>
       </div>
     </>
@@ -565,11 +570,14 @@ function QueFalta({ separacion }: { separacion: SeparacionCompleta }) {
   }
 
   return (
-    <ul className="list-disc space-y-1 pl-5 text-xs leading-snug text-suelo-700">
-      {faltas.map((f) => (
-        <li key={f}>{f}</li>
-      ))}
-    </ul>
+    <div className="space-y-3">
+      <ul className="list-disc space-y-1 pl-5 text-xs leading-snug text-suelo-700">
+        {faltas.map((f) => (
+          <li key={f}>{f}</li>
+        ))}
+      </ul>
+      <RegistrarDocumentoCliente separacion={separacion} />
+    </div>
   )
 }
 

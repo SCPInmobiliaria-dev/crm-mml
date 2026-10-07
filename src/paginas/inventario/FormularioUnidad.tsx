@@ -259,6 +259,12 @@ export function FormularioUnidad({
                       </option>
                     ))}
                   </select>
+                  {unidad?.tieneContratoVivo === true && datos.estadoComercial === 'disponible' && (
+                    <p className="text-xs font-bold leading-snug text-alerta">
+                      Esta unidad tiene un contrato vivo: aunque la guardes como «Disponible», la base
+                      no la ofrece ni la web la publica como libre (sql/17).
+                    </p>
+                  )}
                   {unidad?.tieneSeparacionViva === true && (
                     <p className="text-xs font-bold leading-snug text-suelo-700">
                       Hay una separación viva: su estado lo mueve la separación (y el contrato, y las

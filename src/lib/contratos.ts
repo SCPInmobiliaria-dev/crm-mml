@@ -79,6 +79,14 @@ export type OportunidadContratable = {
   estado: string
   lanzamiento: string | null
   unidadAsignadaId: string | null
+  /**
+   * La unidad del contrato: la asignada a la oportunidad o, si no hay (lo normal:
+   * ninguna pantalla asigna), la de su separación viva. Antes solo se miraba la
+   * asignada y el contrato no se podía crear desde el CRM (auditoría 07/10/2026).
+   */
+  unidadId: string | null
+  /** true = la unidad sale de la separación viva, no de una asignación. */
+  unidadDeLaSeparacion: boolean
   codigoUnidad: string | null
   /** A que parametro quedo congelado el precio, si se anoto en su momento. */
   precioParametro: string | null
@@ -91,7 +99,7 @@ const COLUMNAS_CONTRATABLE =
   'id, persona_id, estado, lanzamiento, unidad_asignada_id, precio_parametro, ' +
   'precio_pactado, precio_moneda, personas(nombre_completo), ' +
   'unidades!oportunidades_unidad_asignada_id_fkey(codigo_unidad), ' +
-  'separaciones(id, estado)'
+  'separaciones(id, estado, archivado_el, unidad_id, unidades(codigo_unidad))'
 
 function relacionada(valor: unknown): Record<string, unknown> | null {
   return typeof valor === 'object' && valor !== null && !Array.isArray(valor)
@@ -117,7 +125,15 @@ function interpretarContratable(fila: unknown): OportunidadContratable | null {
   const separaciones = Array.isArray(f['separaciones']) ? f['separaciones'] : []
   const viva = separaciones
     .map((s) => relacionada(s))
-    .find((s) => s !== null && (texto(s['estado']) === 'verificada' || texto(s['estado']) === 'pendiente_verificacion'))
+    .find(
+      (s) =>
+        s !== null &&
+        s['archivado_el'] == null &&
+        (texto(s['estado']) === 'verificada' || texto(s['estado']) === 'pendiente_verificacion'),
+    )
+  const unidadAsignadaId = texto(f['unidad_asignada_id'])
+  const unidadSeparacion = viva === undefined || viva === null ? null : texto(viva['unidad_id'])
+  const unidadDeLaSeparacionRel = viva === undefined || viva === null ? null : relacionada(viva['unidades'])
 
   return {
     id,
@@ -125,8 +141,17 @@ function interpretarContratable(fila: unknown): OportunidadContratable | null {
     nombreCompleto: (persona === null ? null : texto(persona['nombre_completo'])) ?? '[sin nombre]',
     estado,
     lanzamiento: texto(f['lanzamiento']),
-    unidadAsignadaId: texto(f['unidad_asignada_id']),
-    codigoUnidad: unidad === null ? null : texto(unidad['codigo_unidad']),
+    unidadAsignadaId,
+    unidadId: unidadAsignadaId ?? unidadSeparacion,
+    unidadDeLaSeparacion: unidadAsignadaId === null && unidadSeparacion !== null,
+    codigoUnidad:
+      unidadAsignadaId !== null
+        ? unidad === null
+          ? null
+          : texto(unidad['codigo_unidad'])
+        : unidadDeLaSeparacionRel === null
+          ? null
+          : texto(unidadDeLaSeparacionRel['codigo_unidad']),
     precioParametro: texto(f['precio_parametro']),
     precioPactado: monto(f['precio_pactado']),
     precioMoneda: texto(f['precio_moneda']),

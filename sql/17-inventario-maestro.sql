@@ -35,6 +35,15 @@
 --       Inventario y solo una bandera explicaba por qué no se ofrecía.
 --       `entregada` y `no_disponible` los pone una persona; este archivo no los
 --       toca nunca.
+--   2b· La separación se CIERRA desde el CRM y el contrato se queda con ella
+--       (auditoría del 07/10/2026: eran callejones sin salida):
+--         · crear un contrato con su separación la pasa a aplicada_a_contrato;
+--         · v_unidades_ofrecibles no ofrece una unidad con contrato vivo, y
+--           v_unidades_tablero añade `tiene_contrato_vivo` al final;
+--         · R3: no hay constancia de una separación archivada;
+--         · fn_cerrar_separacion() devuelve, vence o anula (archiva) con
+--           motivo; fn_registrar_doc_cliente() marca el documento del cliente
+--           cuando se olvidó al crear la separación.
 --   3 · documentos.unidad_id y los tipos de papel de una unidad (minuta,
 --       escritura, trámites, carta poder, plano de la unidad): los papeles
 --       del inventario maestro, aunque la unidad no tenga titular todavía.
@@ -209,6 +218,18 @@ end $fn$;
 create or replace function fn_t_sync_unidad_contrato() returns trigger
 language plpgsql security definer set search_path = public as $fn$
 begin
+  -- Un contrato vivo se queda con su separación: la separación pasa a
+  -- `aplicada_a_contrato` y deja de estar viva. Sin esto seguía «viva» para
+  -- siempre, con los relojes vencidos en Hoy y en Separaciones (auditoría del
+  -- 07/10/2026). Solo una separación todavía viva; las cerradas no se tocan.
+  if new.separacion_id is not null and new.archivado_el is null
+     and (tg_op = 'INSERT' or old.separacion_id is distinct from new.separacion_id) then
+    update separaciones
+       set estado = 'aplicada_a_contrato'
+     where id = new.separacion_id
+       and archivado_el is null
+       and estado in ('pendiente_verificacion', 'verificada');
+  end if;
   if tg_op = 'UPDATE' and old.unidad_id is distinct from new.unidad_id then
     perform fn_sincronizar_estado_unidad(old.unidad_id);
   end if;
@@ -233,7 +254,7 @@ create trigger t_sync_unidad_separacion
 
 drop trigger if exists t_sync_unidad_contrato on contratos;
 create trigger t_sync_unidad_contrato
-  after insert or update of unidad_id, archivado_el on contratos
+  after insert or update of unidad_id, archivado_el, separacion_id on contratos
   for each row execute function fn_t_sync_unidad_contrato();
 
 drop trigger if exists t_sync_unidad_cuota on cuotas;
@@ -261,6 +282,219 @@ begin
     perform fn_sincronizar_estado_unidad(r.unidad_id);
   end loop;
 end $$;
+
+
+-- 2e · Una unidad con contrato vivo NO se ofrece, diga lo que diga su estado.
+-- Antes v_unidades_ofrecibles solo miraba asignaciones y separaciones: una
+-- unidad contratada cuyo estado guardado seguía (o volvía, a mano) en
+-- 'disponible' salía ofrecible en el CRM y en la web, con precio y botón de
+-- separar (auditoría del 07/10/2026). La misma lista de columnas que en 03
+-- (`u.*`, que ahora trae al final las columnas añadidas después), más la
+-- condición del contrato.
+create or replace view v_unidades_ofrecibles as
+select u.*
+from unidades u
+where u.archivado_el is null
+  and u.estado_comercial = 'disponible'
+  and u.estado_dato = 'verde'
+  and not exists (
+    select 1 from oportunidades o
+    where o.unidad_asignada_id = u.id and o.situacion = 'activa' and o.archivado_el is null)
+  and not exists (
+    select 1 from separaciones s
+    where s.unidad_id = u.id
+      and s.estado in ('pendiente_verificacion','verificada') and s.archivado_el is null)
+  and not exists (
+    select 1 from contratos c
+    where c.unidad_id = u.id and c.archivado_el is null);
+
+revoke all on v_unidades_ofrecibles from anon;
+grant select on v_unidades_ofrecibles to authenticated;
+
+-- 2f · v_unidades_tablero: la definición de 14 tal cual, más
+-- `tiene_contrato_vivo` AL FINAL (para que el plano pinte «vendida» por el
+-- hecho y no solo por el estado guardado). Sigue SIN security_invoker (R1).
+create or replace view v_unidades_tablero as
+select u.id,
+       u.codigo_unidad,
+       u.tipo,
+       u.area_m2,
+       u.etapa,
+       u.bloque,
+       u.ubicacion,
+       u.estado_comercial,
+       u.estado_dato,
+       u.fuente_plano,
+       u.precio_parametro,
+       u.tipo_socio,
+       u.estado_legal,
+       u.observaciones,
+       u.actualizado_el,
+       exists (select 1 from v_unidades_ofrecibles v where v.id = u.id)
+         as ofrecible,
+       (u.estado_dato = 'verde')                as verificada_contra_plano,
+       (u.estado_comercial = 'disponible')      as disponible_comercialmente,
+       exists (select 1 from oportunidades o
+                where o.unidad_asignada_id = u.id
+                  and o.situacion = 'activa'
+                  and o.archivado_el is null)   as tiene_asignacion_activa,
+       exists (select 1 from separaciones s
+                where s.unidad_id = u.id
+                  and s.estado in ('pendiente_verificacion','verificada')
+                  and s.archivado_el is null)   as tiene_separacion_viva,
+       -- 14 · inventario gráfico
+       u.geometria,
+       u.zona_rubro,
+       u.revisar,
+       u.fuente_disponibilidad,
+       -- 17 · el contrato también se ve
+       exists (select 1 from contratos c
+                where c.unidad_id = u.id
+                  and c.archivado_el is null)   as tiene_contrato_vivo
+from unidades u
+where u.archivado_el is null;
+
+comment on view v_unidades_tablero is
+  'Inventario para la pantalla /inventario. `ofrecible` se consulta a v_unidades_ofrecibles, no se recalcula. Las demas banderas solo EXPLICAN el bloqueo. Sin security_invoker a proposito (R1). Desde 14: geometria, zona_rubro, revisar y fuente_disponibilidad; desde 17: tiene_contrato_vivo. Sin datos personales.';
+
+revoke all on v_unidades_tablero from anon;
+grant select on v_unidades_tablero to authenticated;
+
+-- 2g · R3: tampoco hay constancia de una separación ARCHIVADA (la función de 01
+-- miraba la verificación y el estado, no el archivo).
+create or replace function puede_emitir_constancia(p_separacion_id uuid)
+returns boolean
+language sql stable security definer set search_path = public as $$
+  select coalesce(
+    (select s.verificada_el is not null
+            and s.estado = 'verificada'
+            and s.doc_cliente_registrado
+            and s.archivado_el is null
+       from separaciones s where s.id = p_separacion_id),
+    false)
+$$;
+
+
+-- ---------------------------------------------------------------------
+-- 2h · CERRAR UNA SEPARACIÓN DESDE EL CRM
+-- ---------------------------------------------------------------------
+-- Hasta hoy la única forma de devolver, vencer o anular una separación era el
+-- SQL Editor: la pantalla solo crea y verifica. Y con el estado de la unidad
+-- siguiendo a la separación (§2), una separación que no se cierra deja la
+-- unidad «separada» para siempre.
+--   devolver  estado devuelta + fecha + motivo (el dinero se devolvió).
+--   vencer    estado vencida + motivo. CUÁNDO vence una separación no lo
+--             decide la base: «qué pasa al día 8» no tiene regla escrita
+--             (00-fuente-de-verdad\separacion-vigente.md §3.3, Walter). Lo
+--             marca una persona.
+--   anular    se ARCHIVA con motivo (registro de prueba o hecho por error).
+--             Nada se borra (R8).
+-- 🔵 PROPUESTA de quién puede (a ratificar por Walter): Dirección y
+-- Administración, cualquiera de las tres. Comercial, solo ANULAR una
+-- separación SUYA que todavía no está verificada (un error de carga). La unidad
+-- vuelve sola a su estado anterior (§2) y la web se entera por el aviso de 16.
+create or replace function fn_cerrar_separacion(
+  p_separacion_id uuid,
+  p_accion        text,
+  p_motivo        text,
+  p_fecha         date default null)
+returns jsonb
+language plpgsql security definer set search_path = public as $fn$
+declare
+  v_s       separaciones%rowtype;
+  v_motivo  text := nullif(btrim(coalesce(p_motivo, '')), '');
+  v_gestion boolean := coalesce(es(array['direccion','administracion']::rol_usuario[]), false);
+  v_propia  boolean;
+  v_hoy     date := (now() at time zone 'America/Lima')::date;
+begin
+  if p_accion is null or p_accion not in ('devolver', 'vencer', 'anular') then
+    raise exception 'Acción desconocida: tiene que ser devolver, vencer o anular.';
+  end if;
+  if v_motivo is null then
+    raise exception 'Para cerrar una separación hay que decir por qué: queda registrado.';
+  end if;
+
+  select * into v_s from separaciones where id = p_separacion_id for update;
+  if not found then
+    raise exception 'La separación no existe.';
+  end if;
+  if v_s.archivado_el is not null or v_s.estado not in ('pendiente_verificacion', 'verificada') then
+    raise exception 'Esta separación ya no está viva (está %): no hay nada que cerrar.',
+      case when v_s.archivado_el is not null then 'archivada' else v_s.estado::text end;
+  end if;
+
+  select (v_s.creado_por = auth.uid())
+         or exists (select 1 from oportunidades o
+                     where o.id = v_s.oportunidad_id and o.responsable_id = auth.uid())
+    into v_propia;
+  if not v_gestion then
+    if not (coalesce(es(array['comercial']::rol_usuario[]), false)
+            and p_accion = 'anular' and v_s.verificada_el is null and coalesce(v_propia, false)) then
+      raise exception 'Solo Dirección o Administración pueden devolver, vencer o anular una separación. Un comercial solo puede anular una suya que todavía no está verificada.';
+    end if;
+  end if;
+
+  if p_fecha is not null and p_fecha > v_hoy then
+    raise exception 'La fecha de devolución no puede ser futura.';
+  end if;
+
+  if p_accion = 'devolver' then
+    update separaciones
+       set estado = 'devuelta',
+           devuelta_el = coalesce(p_fecha, v_hoy),
+           motivo_devolucion = left(v_motivo, 500)
+     where id = v_s.id;
+  elsif p_accion = 'vencer' then
+    update separaciones
+       set estado = 'vencida',
+           notas = concat_ws(E'\n', nullif(v_s.notas, ''),
+                             'Vencida el ' || to_char(v_hoy, 'DD/MM/YYYY') || ': ' || left(v_motivo, 500))
+     where id = v_s.id;
+  else
+    update separaciones
+       set archivado_el = now(),
+           notas = concat_ws(E'\n', nullif(v_s.notas, ''),
+                             'Anulada el ' || to_char(v_hoy, 'DD/MM/YYYY') || ': ' || left(v_motivo, 500))
+     where id = v_s.id;
+  end if;
+
+  return jsonb_build_object('ok', true, 'accion', p_accion);
+end $fn$;
+
+comment on function fn_cerrar_separacion is
+  'Devuelve, vence o anula (archiva) una separacion viva, con motivo. Direccion y administracion; un comercial solo anula una suya sin verificar. La unidad vuelve sola a su estado anterior (fn_sincronizar_estado_unidad).';
+
+-- La casilla «documento del cliente registrado» solo se podía marcar al crear la
+-- separación: si se olvidó, la constancia quedaba bloqueada para siempre (R3).
+create or replace function fn_registrar_doc_cliente(p_separacion_id uuid)
+returns jsonb
+language plpgsql security definer set search_path = public as $fn$
+declare
+  v_s separaciones%rowtype;
+begin
+  if not coalesce(es(array['direccion','comercial','administracion']::rol_usuario[]), false) then
+    raise exception 'Tu rol no puede registrar el documento del cliente.';
+  end if;
+  select * into v_s from separaciones where id = p_separacion_id for update;
+  if not found or v_s.archivado_el is not null
+     or v_s.estado not in ('pendiente_verificacion', 'verificada') then
+    raise exception 'La separación no existe o ya no está viva.';
+  end if;
+  if not exists (select 1 from personas p
+                  where p.id = v_s.persona_id and p.doc_numero is not null) then
+    raise exception 'La ficha del cliente todavía no tiene su documento: regístralo primero en su ficha.';
+  end if;
+  update separaciones set doc_cliente_registrado = true where id = v_s.id;
+  return jsonb_build_object('ok', true);
+end $fn$;
+
+comment on function fn_registrar_doc_cliente is
+  'Marca doc_cliente_registrado cuando la ficha de la persona ya tiene su documento. Antes solo se podia al crear la separacion.';
+
+revoke all on function fn_cerrar_separacion(uuid, text, text, date) from public, anon;
+revoke all on function fn_registrar_doc_cliente(uuid) from public, anon;
+grant execute on function fn_cerrar_separacion(uuid, text, text, date) to authenticated;
+grant execute on function fn_registrar_doc_cliente(uuid) to authenticated;
 
 
 -- ---------------------------------------------------------------------
