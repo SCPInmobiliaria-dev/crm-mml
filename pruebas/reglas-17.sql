@@ -49,9 +49,38 @@
 -- SUPLANTACIÓN: como reglas-13 — claims del JWT con set_config; para RLS,
 -- `set local role authenticated` (o `anon`).
 -- =====================================================================
+--
+-- ---------------------------------------------------------------------
+-- CÓMO SE CORRE (versión de una sola sentencia, 07/10/2026)
+-- ---------------------------------------------------------------------
+-- El SQL Editor de Supabase no siempre mantiene un `begin … rollback` entre
+-- sentencias: la primera corrida de esta batería falló con «relation
+-- "resultado" does not exist» porque la tabla temporal ya se había borrado.
+-- Por eso ahora TODO va dentro de una función: corre en una sola sentencia,
+-- lo deshace todo al final (un error atrapado a propósito: nada de lo que
+-- crea queda en la base) y devuelve el cuadro como filas. La función se
+-- borra sola al terminar. Se pega entero y se pulsa Run; da igual el editor.
+-- =====================================================================
 
-begin;
-
+create or replace function public.probar_reglas_17()
+returns table (n integer, regla text, veredicto text, prueba text, esperado text, obtenido text)
+language plpgsql set search_path = public as $bateria$
+#variable_conflict use_column
+declare
+  v_cuadro jsonb;
+begin
+  -- Sin la migración que se prueba, no se corre nada: se dice qué falta.
+  if not (to_regprocedure('public.fn_cerrar_separacion(uuid,text,text,date)') is not null and exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'unidades' and column_name = 'estado_comercial_previo')) then
+    return query
+      select 1, 'PRE'::text, '🔴 FALLA'::text, 'La migración está aplicada'::text, 'sí'::text,
+             'NO: falta aplicar sql/17-inventario-maestro.sql en el SQL Editor. Aplícala primero y vuelve a correr esta batería.'::text
+      union all
+      select 9999, 'RESUMEN'::text, '0 pasan · 1 fallan · 0 omitidas'::text, '1 pruebas'::text,
+             'Mira las filas 🔴 de arriba: son las únicas que exigen algo'::text, ''::text;
+    execute 'drop function if exists public.probar_reglas_17()';
+    return;
+  end if;
+  begin
 -- @@INICIO_CUERPO
 
 -- ---------------------------------------------------------------------
@@ -122,7 +151,7 @@ begin
   return v;
 end $$;
 
-do $$
+  -- (bloque)
 declare v_n integer; v_fn boolean;
 begin
   insert into fixture select 'direccion', id from perfiles
@@ -140,7 +169,7 @@ begin
    'función sí · 4 de 4 perfiles',
    concat_ws(' · ', 'función ' || case when v_fn then 'sí' else 'NO' end, v_n || ' de 4 perfiles'),
    case when not v_fn then '🔴 FALLA' when v_n = 4 then '✅ PASA' else '🟡 OMITIDA' end);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -148,7 +177,7 @@ end $$;
 -- ---------------------------------------------------------------------
 -- 1a · Las dos funciones de titular: DEFINER con search_path fijo; authenticated
 -- las ejecuta; ni anon ni PUBLIC.
-do $$
+  -- (bloque)
 declare v_a text; v_ok boolean := true; r record;
 begin
   for r in select p.oid::regprocedure::text as nombre, p.prosecdef, coalesce(array_to_string(p.proconfig, ' '), '') as conf
@@ -169,10 +198,10 @@ begin
   perform pg_temp.anotar('SEG', 'fn_guardar_titular_unidad y fn_quitar_titular_unidad: DEFINER, search_path fijo, authenticated sí, anon y PUBLIC no',
     '2 funciones · definer · search_path=public · auth true · anon false · public false',
     coalesce(v_a, 'no existen: falta aplicar sql/17'), v_a is not null and v_ok);
-end $$;
+end;
 
 -- 1b · Las cinco funciones internas del estado: nadie las ejecuta.
-do $$
+  -- (bloque)
 declare v_con text;
 begin
   select string_agg(p.oid::regprocedure::text, ', ') into v_con
@@ -188,13 +217,13 @@ begin
   perform pg_temp.anotar('SEG', 'Las cinco funciones internas del estado de la unidad no las ejecuta nadie (ni authenticated, ni anon, ni PUBLIC)',
     'ninguna con EXECUTE', coalesce(v_con, 'ninguna con EXECUTE'), v_con is null
       and to_regprocedure('public.fn_sincronizar_estado_unidad(uuid)') is not null);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
 -- 2 · DATOS DE PRUEBA
 -- ---------------------------------------------------------------------
-do $$
+  -- (bloque)
 declare v_per uuid;
 begin
   insert into personas (nombre_completo, telefono_e164) values ('PRUEBA17 Persona', '+51900170001')
@@ -218,7 +247,7 @@ begin
   perform pg_temp.anotar('PREP', 'Preparación: 1 persona y 10 unidades PRUEBA17-*', 'sin error', 'sin error', true);
 exception when others then
   perform pg_temp.anotar('PREP', 'Preparación: 1 persona y 10 unidades PRUEBA17-*', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -227,7 +256,7 @@ end $$;
 
 -- 3a · pendiente → reservada_temporal · verificada → separada · devuelta →
 -- vuelve a disponible.
-do $$
+  -- (bloque)
 declare v_sep uuid; v_ini text; v_pend text; v_ver text; v_dev text; v_dir uuid := pg_temp.f('direccion');
 begin
   v_ini := pg_temp.estado('PRUEBA17-A');
@@ -248,11 +277,11 @@ exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('EST', 'Separación: pendiente → reservada_temporal · verificada → separada · devuelta → vuelve a disponible',
     'sin error', sqlerrm, false);
-end $$;
+end;
 
 -- 3b · archivar una separación pendiente también devuelve la unidad; y la
 -- web la ve «separada» mientras está viva.
-do $$
+  -- (bloque)
 declare v_sep uuid; v_pend text; v_web_pend text; v_arch text; v_web_arch text;
 begin
   v_sep := pg_temp.separar('PRUEBA17-A');
@@ -266,13 +295,13 @@ begin
     concat_ws(' · ', v_pend, 'web ' || coalesce(v_web_pend, 'sin función'), '→', v_arch, 'web ' || coalesce(v_web_arch, 'sin función')),
     v_pend = 'reservada_temporal/disponible' and v_arch = 'disponible/—'
       and (v_web_pend is null or (v_web_pend = 'separada' and v_web_arch = 'disponible')));
-end $$;
+end;
 
 -- 3c · el ciclo entero: separación verificada → contrato (la separación pasa
 -- a aplicada_a_contrato) → contratada → cuotas pendientes siguen contratada →
 -- todas pagadas → pagada → otra cuota pendiente → contratada → condonada →
 -- pagada → contrato archivado → vuelve a disponible.
-do $$
+  -- (bloque)
 declare v_sep uuid; v_con uuid; v_c1 uuid; v_c2 uuid; v_dir uuid := pg_temp.f('direccion');
         v_per uuid := pg_temp.f('per'); v_h uuid := pg_temp.f('u_h');
         a text; b text; c text; d text; e text; f text; g text; h text; v_web text;
@@ -310,12 +339,12 @@ begin
 exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('EST', 'Contrato: verificada → separada · contrato vivo → contratada · cuotas → pagada · archivado → vuelve', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 -- 3d · lo que pone una persona no se toca: una unidad retirada de venta, una
 -- entregada, y una que ya iba MÁS ADELANTE (contratada a mano) que la
 -- separación que se abre encima.
-do $$
+  -- (bloque)
 declare v_n text; v_c text; v_e text;
 begin
   perform pg_temp.separar('PRUEBA17-N');
@@ -327,11 +356,11 @@ begin
   perform pg_temp.anotar('EST', 'No se pisa lo que puso una persona: no_disponible, contratada a mano (más adelante que la separación) y entregada quedan como estaban',
     'no_disponible/— · contratada/— · entregada/—', concat_ws(' · ', v_n, v_c, v_e),
     v_n = 'no_disponible/—' and v_c = 'contratada/—' and v_e = 'entregada/—');
-end $$;
+end;
 
 -- 3e · si una persona cambia el estado entre medias, se respeta: al caerse la
 -- separación la unidad NO vuelve al estado viejo.
-do $$
+  -- (bloque)
 declare v_sep uuid; v_pend text; v_fin text;
 begin
   v_sep := pg_temp.separar('PRUEBA17-M');
@@ -342,10 +371,10 @@ begin
   perform pg_temp.anotar('EST', 'Un cambio manual entre medias se respeta: al vencer la separación la unidad queda como la dejó la persona y se olvida el estado anterior',
     'reservada_temporal/disponible → no_disponible/—', v_pend || ' → ' || v_fin,
     v_pend = 'reservada_temporal/disponible' and v_fin = 'no_disponible/—');
-end $$;
+end;
 
 -- 3f · cambiar la separación de unidad: la vieja se suelta y la nueva se mueve.
-do $$
+  -- (bloque)
 declare v_sep uuid; a text; b text; c text; d text;
 begin
   v_sep := pg_temp.separar('PRUEBA17-R1');
@@ -358,10 +387,10 @@ begin
     'R1 reservada/disponible, R2 disponible/— → R1 disponible/—, R2 reservada/disponible',
     concat_ws(' ', 'R1', a, 'R2', b, '→ R1', c, 'R2', d),
     a = 'reservada_temporal/disponible' and b = 'disponible/—' and c = 'disponible/—' and d = 'reservada_temporal/disponible');
-end $$;
+end;
 
 -- 3g · R1 sigue en pie: dos separaciones vivas sobre la misma unidad, no.
-do $$
+  -- (bloque)
 declare v_fallo boolean := false; v_msg text := 'se aceptó la segunda separación';
 begin
   perform pg_temp.separar('PRUEBA17-A');
@@ -372,11 +401,11 @@ begin
   perform pg_temp.anotar('EST', 'R1 sigue en pie: una segunda separación viva sobre la misma unidad se rechaza',
     'unidad_una_separacion_viva', left(v_msg, 80),
     pg_temp.veredicto_error(v_fallo, v_msg, 'unidad_una_separacion_viva'));
-end $$;
+end;
 
 -- 3h · todo cambio queda en la bitácora con quién lo hizo: el paso a
 -- «separada» del 3a lo hizo Dirección.
-do $$
+  -- (bloque)
 declare v_n integer; v_dir uuid := pg_temp.f('direccion');
 begin
   select count(*) into v_n from bitacora
@@ -384,10 +413,10 @@ begin
      and despues ->> 'estado_comercial' = 'separada' and actor_id = v_dir;
   perform pg_temp.anotar('EST', 'El paso a «separada» queda en la bitácora de unidades con el actor que verificó la separación',
     '1 o más filas con actor = dirección', v_n || ' filas', v_n >= 1);
-end $$;
+end;
 
 -- 3i · idempotencia: sincronizar dos veces no cambia nada.
-do $$
+  -- (bloque)
 declare a text; b text;
 begin
   a := pg_temp.estado('PRUEBA17-R2') || pg_temp.estado('PRUEBA17-C') || pg_temp.estado('PRUEBA17-N');
@@ -397,7 +426,7 @@ begin
   perform fn_sincronizar_estado_unidad(pg_temp.f('u_r2'));
   b := pg_temp.estado('PRUEBA17-R2') || pg_temp.estado('PRUEBA17-C') || pg_temp.estado('PRUEBA17-N');
   perform pg_temp.anotar('EST', 'Sincronizar dos veces no cambia nada', a, b, a = b);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -408,7 +437,7 @@ end $$;
 
 -- 4a · Dirección crea un titular nuevo: persona de verdad, socia, sin
 -- consentimiento todavía, con la fuente y el vínculo en la unidad.
-do $$
+  -- (bloque)
 declare v_r jsonb; v_per uuid; v_p personas%rowtype; v_tit uuid; v_u uuid := pg_temp.f('u_t'); v_dir uuid := pg_temp.f('direccion');
 begin
   perform pg_temp.como(v_dir);
@@ -431,11 +460,11 @@ exception when others then
   execute 'reset role';
   perform pg_temp.como(null);
   perform pg_temp.anotar('TIT', 'Dirección crea un titular', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 -- 4b · el mismo documento otra vez (sin elegir persona) NO crea una segunda
 -- persona: reutiliza la que ya estaba y no la pisa.
-do $$
+  -- (bloque)
 declare v_r jsonb; v_n integer; v_nombre text; v_u uuid := pg_temp.f('u_d'); v_adm uuid := pg_temp.f('administracion');
 begin
   perform pg_temp.como(v_adm);
@@ -452,11 +481,11 @@ exception when others then
   execute 'reset role';
   perform pg_temp.como(null);
   perform pg_temp.anotar('TIT', 'Administración reutiliza al titular por documento', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 -- 4c · editar a una persona elegida actualiza SUS datos; pero no puede quedarse
 -- con el documento de otra.
-do $$
+  -- (bloque)
 declare v_r jsonb; v_tel text; v_fallo boolean := false; v_msg text := 'se aceptó el documento de otra persona';
         v_tit uuid := pg_temp.f('tit1'); v_u uuid := pg_temp.f('u_t'); v_dir uuid := pg_temp.f('direccion'); v_otra uuid;
 begin
@@ -479,11 +508,11 @@ exception when others then
   execute 'reset role';
   perform pg_temp.como(null);
   perform pg_temp.anotar('TIT', 'Editar al titular elegido', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 -- 4d · quién NO puede: comercial, lectura/contabilidad, un usuario de dirección
 -- desactivado (es() devuelve NULL, y `if not es()` no dispara con NULL) y anon.
-do $$
+  -- (bloque)
 declare v_u uuid := pg_temp.f('u_d'); v_dir uuid := pg_temp.f('direccion');
         v_com uuid := pg_temp.f('comercial'); v_lec uuid := pg_temp.f('lector');
         m_com text := 'se aceptó'; m_lec text := 'se aceptó'; m_ina text := 'se aceptó'; m_anon text := 'se aceptó';
@@ -530,12 +559,12 @@ exception when others then
   update perfiles set activo = true where id = v_dir;
   perform pg_temp.como(null);
   perform pg_temp.anotar('TIT', 'Quién no puede cambiar el titular', 'sin error', sqlerrm, false);
-end $$;
+end;
 -- (Nota para quien lea el cuadro: `v_tit is distinct from null` comprueba que
 --  u_d conserva el titular que le puso 4b; los intrusos no lo cambiaron.)
 
 -- 4e · lo que se recibe se valida, con mensajes en español.
-do $$
+  -- (bloque)
 declare v_u uuid := pg_temp.f('u_t'); v_dir uuid := pg_temp.f('direccion'); v_msgs text := ''; v_ok boolean := true; v_m text; v_i integer;
   casos text[][] := array[
     array['sin nombre',      '',   null, null, null, null, 'El nombre del titular es obligatorio'],
@@ -562,11 +591,11 @@ exception when others then
   execute 'reset role';
   perform pg_temp.como(null);
   perform pg_temp.anotar('TIT', 'Validación del titular', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 -- 4f · quitar al titular suelta el vínculo y NO borra a la persona (R8);
 -- queda en la bitácora de unidades.
-do $$
+  -- (bloque)
 declare v_u uuid := pg_temp.f('u_t'); v_tit uuid := pg_temp.f('tit1'); v_dir uuid := pg_temp.f('direccion');
         v_vinculo uuid; v_existe boolean; v_bit integer;
 begin
@@ -587,7 +616,7 @@ exception when others then
   execute 'reset role';
   perform pg_temp.como(null);
   perform pg_temp.anotar('TIT', 'Quitar al titular', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -595,7 +624,7 @@ end $$;
 -- ---------------------------------------------------------------------
 -- 5a · Dirección y Administración suben papeles a una unidad (sin persona ni
 -- oportunidad); Comercial no; y lo mismo con el objeto del bucket.
-do $$
+  -- (bloque)
 declare v_u uuid := pg_temp.f('u_d'); v_dir uuid := pg_temp.f('direccion'); v_adm uuid := pg_temp.f('administracion');
         v_com uuid := pg_temp.f('comercial');
         v_doc1 uuid; v_doc2 uuid; v_fallo boolean := false; v_msg text := 'se aceptó';
@@ -627,11 +656,11 @@ exception when others then
   execute 'reset role';
   perform pg_temp.como(null);
   perform pg_temp.anotar('DOC', 'Registrar papeles de una unidad', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 -- 5b · quién LEE los papeles de una unidad: dirección y administración sí;
 -- comercial, lectura y un usuario de dirección desactivado no.
-do $$
+  -- (bloque)
 declare v_u uuid := pg_temp.f('u_d'); v_dir uuid := pg_temp.f('direccion'); v_adm uuid := pg_temp.f('administracion');
         v_com uuid := pg_temp.f('comercial'); v_lec uuid := pg_temp.f('lector');
         n_dir integer; n_adm integer; n_com integer; n_lec integer; n_ina integer;
@@ -658,11 +687,11 @@ exception when others then
   update perfiles set activo = true where id = v_dir;
   perform pg_temp.como(null);
   perform pg_temp.anotar('DOC', 'Quién lee los papeles de una unidad', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 -- 5c · las reglas de forma: un papel necesita persona o unidad; los tipos
 -- nuevos entran, uno inventado no.
-do $$
+  -- (bloque)
 declare f_vacio boolean := false; m_vacio text := 'se aceptó'; f_tipo boolean := false; m_tipo text := 'se aceptó';
         v_n integer; v_u uuid := pg_temp.f('u_d');
 begin
@@ -679,11 +708,11 @@ begin
     concat_ws(' · ', left(m_vacio, 50), left(m_tipo, 50), v_n || ' aceptados'),
     pg_temp.veredicto_error(f_vacio, m_vacio, 'documentos_persona_o_unidad')
       and pg_temp.veredicto_error(f_tipo, m_tipo, 'documentos_tipo_valido') and v_n = 7);
-end $$;
+end;
 
 -- 5d · el archivo en el bucket: lo lee dirección mientras su fila está vigente;
 -- comercial no; archivado con motivo, deja de leerse (R8: no se borra).
-do $$
+  -- (bloque)
 declare v_u uuid := pg_temp.f('u_d'); v_dir uuid := pg_temp.f('direccion'); v_com uuid := pg_temp.f('comercial');
         v_ruta text := 'prueba-17/' || gen_random_uuid()::text || '.pdf'; v_doc uuid;
         l_dir integer; l_com integer; l_arch integer; v_arch timestamptz; v_paso text := 'insert documentos';
@@ -716,11 +745,11 @@ exception when others then
   execute 'reset role';
   perform pg_temp.como(null);
   perform pg_temp.anotar('DOC', 'Archivo de un papel de unidad en el bucket', 'sin error', v_paso || ': ' || sqlerrm, false);
-end $$;
+end;
 
 -- 5e · lo que ya andaba no se rompe: un comercial sigue adjuntando documentos de
 -- SU oportunidad a la persona, y los ve.
-do $$
+  -- (bloque)
 declare v_per uuid := pg_temp.f('per'); v_com uuid := pg_temp.f('comercial'); v_op uuid; v_doc uuid; v_n integer;
 begin
   insert into oportunidades (persona_id, responsable_id) values (v_per, v_com) returning id into v_op;
@@ -737,7 +766,7 @@ exception when others then
   execute 'reset role';
   perform pg_temp.como(null);
   perform pg_temp.anotar('DOC', 'Documento de persona sigue funcionando', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -746,7 +775,7 @@ end $$;
 
 -- 6a · Al crear el contrato con su separación, la separación pasa SOLA a
 -- aplicada_a_contrato (deja de estar viva) y la unidad queda contratada.
-do $$
+  -- (bloque)
 declare v_sep uuid; v_dir uuid := pg_temp.f('direccion'); v_u uuid; v_est text; v_viva boolean; v_uni text;
 begin
   insert into unidades (codigo_unidad, tipo, estado_comercial, estado_dato, fuente_plano)
@@ -767,11 +796,11 @@ begin
 exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('CIERRE', 'Crear el contrato con su separación', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 -- 6b · Una unidad con contrato vivo nunca es ofrecible, aunque alguien deje su
 -- estado guardado en 'disponible'; el tablero lo dice y la web no la ofrece.
-do $$
+  -- (bloque)
 declare v_u uuid; v_ofr boolean; v_tc boolean; v_web text;
 begin
   insert into unidades (codigo_unidad, tipo, estado_comercial, estado_dato, fuente_plano, area_m2)
@@ -787,10 +816,10 @@ begin
     v_ofr = false and v_tc = true and coalesce(v_web, 'x') <> 'disponible');
 exception when others then
   perform pg_temp.anotar('CIERRE', 'Con contrato vivo nunca es ofrecible', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 -- 6c · R3: no hay constancia de una separación archivada.
-do $$
+  -- (bloque)
 declare v_sep uuid; v_dir uuid := pg_temp.f('direccion'); v_antes boolean; v_despues boolean;
 begin
   insert into unidades (codigo_unidad, tipo, estado_comercial, estado_dato, fuente_plano)
@@ -808,10 +837,10 @@ begin
 exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('CIERRE', 'R3 con separación archivada', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 -- 6d · fn_cerrar_separacion, con la sesión de la app: quién puede qué.
-do $$
+  -- (bloque)
 declare v_dir uuid := pg_temp.f('direccion'); v_adm uuid := pg_temp.f('administracion'); v_com uuid := pg_temp.f('comercial');
         v_s1 uuid; v_s2 uuid; v_s3 uuid; v_s4 uuid; v_op uuid;
         m_dev text := 'se aceptó'; m_ajena text := 'se aceptó'; m_sin text := 'se aceptó'; m_fut text := 'se aceptó'; m_doble text := 'se aceptó';
@@ -877,11 +906,11 @@ exception when others then
   execute 'reset role';
   perform pg_temp.como(null);
   perform pg_temp.anotar('CIERRE', 'fn_cerrar_separacion por rol', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 -- 6e · Registrar el documento del cliente después de crear la separación
 -- (antes solo se podía al crearla): sin DNI en la ficha se rechaza; con DNI, sí.
-do $$
+  -- (bloque)
 declare v_sep uuid; v_per uuid; v_op uuid; v_com uuid := pg_temp.f('comercial'); m text := 'se aceptó'; v_ok boolean;
 begin
   insert into unidades (codigo_unidad, tipo, estado_comercial, estado_dato, fuente_plano)
@@ -907,11 +936,11 @@ exception when others then
   execute 'reset role';
   perform pg_temp.como(null);
   perform pg_temp.anotar('CIERRE', 'Registrar el documento del cliente', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 -- 6f · R2 con RLS de verdad: un comercial no deshace la verificación de Walter
 -- ni edita la separación de otro vendedor; la suya sin verificar, sí.
-do $$
+  -- (bloque)
 declare v_dir uuid := pg_temp.f('direccion'); v_com uuid := pg_temp.f('comercial');
         v_ver uuid; v_ajena uuid; v_suya uuid; v_op uuid; n_ver integer; n_ajena integer; n_suya integer; v_sigue timestamptz;
 begin
@@ -950,14 +979,12 @@ exception when others then
   execute 'reset role';
   perform pg_temp.como(null);
   perform pg_temp.anotar('CIERRE', 'R2 con RLS en separaciones', 'sin error', sqlerrm, false);
-end $$;
-
--- @@FIN_CUERPO
+end;
 
 
--- =====================================================================
--- EL CUADRO FINAL (una sola consulta: el SQL Editor enseña solo la última)
--- =====================================================================
+    -- El cuadro, ANTES de deshacer: lo que se guarda en una variable sobrevive.
+    select jsonb_agg(to_jsonb(c) order by c.n) into v_cuadro
+      from (
 with resumen as (
   select 9999 as n,
          'RESUMEN' as regla,
@@ -976,11 +1003,26 @@ from (
   union all
   select n, regla, veredicto, prueba, esperado, obtenido from resumen
 ) todo
-order by n;
+order by n
+      ) c;
+    -- Deshacer TODO lo que hizo la batería (unidades, personas, separaciones,
+    -- papeles, tablas y funciones temporales): un error atrapado justo abajo.
+    raise exception using errcode = 'P0999', message = 'deshacer la batería';
+  exception when sqlstate 'P0999' then
+    null;
+  end;
 
+  -- La función no se queda en la base: se borra a sí misma.
+  execute 'drop function if exists public.probar_reglas_17()';
 
--- =====================================================================
--- ⚠️ NO BORRES ESTA LÍNEA: deshace las unidades, personas, separaciones,
--- contratos, papeles y el objeto del bucket de esta prueba.
--- =====================================================================
-rollback;
+  return query
+    select x.n, x.regla, x.veredicto, x.prueba, x.esperado, x.obtenido
+      from jsonb_to_recordset(v_cuadro)
+        as x(n integer, regla text, veredicto text, prueba text, esperado text, obtenido text)
+     order by x.n;
+end $bateria$;
+
+-- Nadie la puede llamar por la API mientras exista (solo quien la creó, en el editor).
+revoke all on function public.probar_reglas_17() from public, anon, authenticated;
+
+select * from public.probar_reglas_17();

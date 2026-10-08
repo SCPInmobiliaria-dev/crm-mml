@@ -300,8 +300,18 @@ declara nada VALIDADO.
 
 **En Supabase:** después de aplicar 17, SQL Editor → pegar `reglas-17.sql` entero → Run. Necesita
 un perfil activo de dirección, administración, comercial y lectura o contabilidad (si falta uno, la
-fila PRE sale 🟡). Todo va entre `begin … rollback`. Lo esperado: la fila 9999 dice
-`30 pasan · 0 fallan · 0 omitidas`.
+fila PRE sale 🟡). Lo esperado: la fila 9999 dice `30 pasan · 0 fallan · 0 omitidas`.
+
+**Por qué ya no va entre `begin … rollback` (07/10/2026).** La primera corrida en el SQL Editor
+falló al instante con `relation "resultado" does not exist`: el editor no mantuvo la transacción
+entre sentencias y la tabla temporal `on commit drop` se borró antes de usarla (no llegó a escribir
+nada). Ahora la batería es **una función** (`public.probar_reglas_17`) que hace todo en una sola
+sentencia, lo deshace con un error atrapado a propósito, se **borra a sí misma** y devuelve el
+cuadro como filas. Funciona igual tanto si el editor manda todo junto como si lo corta sentencia
+por sentencia (ensayado de las dos formas en PGlite, sin dejar ni una fila, y con las mutaciones de
+§11 atrapadas). Si 17 no está aplicado, sale una sola fila 🔴 diciéndolo, en vez de reventar.
+`pruebas/convertir-bateria.mjs` hace esta conversión para las demás baterías (13, 15, 16, 19, 20 y
+`reglas.sql` siguen con el formato viejo y tendrán el mismo problema en el editor).
 
 **Ojo con 20:** si `sql/20-inventario-publico-como-crm.sql` está aplicado, `reglas-16.sql` (filas 7
 y 9) y `reglas-19.sql` (fila 14) fallan porque siguen exigiendo las claves EXACTAS de antes de 20
