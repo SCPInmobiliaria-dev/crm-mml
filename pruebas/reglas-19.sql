@@ -28,9 +28,40 @@
 -- salen 🟡 OMITIDA.
 -- Lo esperado: `20 pasan · 0 fallan · 0 omitidas` (así salió en PGlite el 06/10/2026).
 -- =====================================================================
+--
+-- ---------------------------------------------------------------------
+-- CÓMO SE CORRE (versión de una sola sentencia, 07/10/2026)
+-- ---------------------------------------------------------------------
+-- El SQL Editor de Supabase no siempre mantiene un `begin … rollback` entre
+-- sentencias: la primera corrida de esta batería falló con «relation
+-- "resultado" does not exist» porque la tabla temporal ya se había borrado.
+-- Por eso ahora TODO va dentro de una función: corre en una sola sentencia,
+-- lo deshace todo al final (un error atrapado a propósito: nada de lo que
+-- crea queda en la base) y devuelve el cuadro como filas. La función se
+-- borra sola al terminar. Se pega entero y se pulsa Run; da igual el editor.
+-- =====================================================================
 
-begin;
-
+create or replace function public.probar_reglas_19()
+returns table (n integer, regla text, veredicto text, prueba text, esperado text, obtenido text)
+language plpgsql set search_path = public as $bateria$
+#variable_conflict use_column
+declare
+  v_cuadro jsonb;
+  v_caida  text;
+  v_ctx    text;
+begin
+  -- Sin la migración que se prueba, no se corre nada: se dice qué falta.
+  if not (to_regprocedure('public.fn_asignar_precio(uuid[],text)') is not null) then
+    return query
+      select 1, 'PRE'::text, '🔴 FALLA'::text, 'La migración está aplicada'::text, 'sí'::text,
+             'NO: falta aplicar sql/19-precio-por-unidad.sql en el SQL Editor. Aplícala primero y vuelve a correr esta batería.'::text
+      union all
+      select 9999, 'RESUMEN'::text, '0 pasan · 1 fallan · 0 omitidas'::text, '1 pruebas'::text,
+             'Mira las filas 🔴 de arriba: son las únicas que exigen algo'::text, ''::text;
+    execute 'drop function if exists public.probar_reglas_19()';
+    return;
+  end if;
+  begin
 -- @@INICIO_CUERPO
 
 create temporary table resultado (
@@ -102,7 +133,7 @@ insert into fixture select 'direccion', id from perfiles where rol = 'direccion'
 -- ---------------------------------------------------------------------
 -- 1 · LA BASE IMPIDE UN PRECIO QUE NO CORRESPONDE (t_unidades_precio_valido)
 -- ---------------------------------------------------------------------
-do $$
+<<bloque_1>>
 begin
   begin
     update unidades set precio_parametro = 'inventario_disponibilidad_corte' where id = pg_temp.f('P1');
@@ -134,18 +165,18 @@ begin
   exception when others then
     perform pg_temp.anotar('BASE', 'tienda escrita «Tienda» con precio de tienda', 'aceptado', sqlerrm, false);
   end;
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
 -- 2 · fn_asignar_precio
 -- ---------------------------------------------------------------------
-do $$
+<<bloque_2>>
 declare r jsonb;
 begin
   if pg_temp.f('comercial') is null or pg_temp.f('direccion') is null then
     perform pg_temp.omitir('RPC', 'asignar en bloque (rol, tipo, idempotencia, quitar)', 'un perfil comercial y uno de direccion activos');
-    return;
+    exit bloque_2;
   end if;
 
   perform pg_temp.como(pg_temp.f('comercial'));
@@ -178,18 +209,18 @@ begin
     (select precio_parametro from unidades where id = pg_temp.f('T1')) is null);
 
   perform pg_temp.como(null);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
 -- 3 · LA WEB SOLO VE EL PRECIO VERDE DE UNA UNIDAD DISPONIBLE
 -- ---------------------------------------------------------------------
-do $$
+<<bloque_3>>
 declare e jsonb;
 begin
   if pg_temp.f('direccion') is null then
     perform pg_temp.omitir('WEB', 'precio publicado', 'los precios se asignan en §2');
-    return;
+    exit bloque_3;
   end if;
 
   e := pg_temp.publica('PRUEBA19-P1');
@@ -208,10 +239,10 @@ begin
   perform pg_temp.anotar('WEB', 'sin nivel ⇒ sin precio; siete claves', 'null · 7 claves',
     coalesce(e ->> 'precio', 'null') || ' · ' || (select count(*) from jsonb_object_keys(e)) || ' claves',
     jsonb_typeof(e -> 'precio') = 'null' and (select count(*) from jsonb_object_keys(e)) = 7);
-end $$;
+end;
 
 -- Lo que anon puede ejecutar.
-do $$
+<<bloque_4>>
 begin
   perform pg_temp.anotar('ANON', 'anon ejecuta fn_inventario_publico() y NO fn_asignar_precio()',
     'sí · no',
@@ -219,13 +250,13 @@ begin
     case when has_function_privilege('anon', 'fn_asignar_precio(uuid[], text)', 'execute') then 'sí' else 'no' end,
     has_function_privilege('anon', 'fn_inventario_publico()', 'execute')
       and not has_function_privilege('anon', 'fn_asignar_precio(uuid[], text)', 'execute'));
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
 -- 4 · EL AVISO DE REALTIME SALTA CON UN NIVEL DE PRECIO
 -- ---------------------------------------------------------------------
-do $$
+<<bloque_5>>
 declare v_tabla text;
 begin
   perform set_config('mml.inventario_publico_tabla', '', true);
@@ -239,13 +270,13 @@ begin
   v_tabla := current_setting('mml.inventario_publico_tabla', true);
   perform pg_temp.anotar('AVISO', 'otro parámetro (separacion_monto) NO avisa', '(no avisó)', coalesce(nullif(v_tabla, ''), '(no avisó)'),
     coalesce(v_tabla, '') = '');
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
 -- 5 · CATÁLOGO
 -- ---------------------------------------------------------------------
-do $$
+<<bloque_6>>
 begin
   perform pg_temp.anotar('CAT', 'fn_asignar_precio es SECURITY DEFINER con search_path fijo', 'sí',
     (select case when p.prosecdef and array_to_string(p.proconfig, ',') like '%search_path=public%' then 'sí' else 'no' end
@@ -262,14 +293,12 @@ begin
       case when has_function_privilege('public', 'fn_unidades_precio_valido()', 'execute') then 'sí' else 'no' end),
     not has_function_privilege('anon', 'fn_unidades_precio_valido()', 'execute')
       and not has_function_privilege('authenticated', 'fn_unidades_precio_valido()', 'execute'));
-end $$;
-
--- @@FIN_CUERPO
+end;
 
 
--- =====================================================================
--- EL CUADRO FINAL
--- =====================================================================
+    -- El cuadro, ANTES de deshacer: lo que se guarda en una variable sobrevive.
+    select jsonb_agg(to_jsonb(c) order by c.n) into v_cuadro
+      from (
 with resumen as (
   select 9999 as n,
          'RESUMEN' as regla,
@@ -288,7 +317,42 @@ from (
   union all
   select n, regla, veredicto, prueba, esperado, obtenido from resumen
 ) todo
-order by n;
+order by n
+      ) c;
+    -- Deshacer TODO lo que hizo la batería (unidades, personas, separaciones,
+    -- papeles, tablas y funciones temporales): un error atrapado justo abajo.
+    raise exception using errcode = 'P0999', message = 'deshacer la batería';
+  exception
+    when sqlstate 'P0999' then
+      null;
+    when others then
+      -- La batería se cayó a mitad de camino (p. ej. una regresión en la migración que prueba).
+      -- Lo que hizo ya se deshizo con el sub-bloque; el error no se esconde: sale como fila.
+      get stacked diagnostics v_ctx = pg_exception_context;
+      v_caida := sqlerrm;
+  end;
 
--- ⚠️ NO BORRES ESTA LÍNEA: deshace las unidades y los niveles de prueba.
-rollback;
+  -- La función no se queda en la base: se borra a sí misma.
+  execute 'drop function if exists public.probar_reglas_19()';
+
+  if v_caida is not null then
+    return query
+      select 1, 'CAÍDA'::text, '🔴 FALLA'::text, 'La batería llegó hasta el final sin caerse'::text, 'sin error'::text,
+             left(v_caida || ' · ' || coalesce(replace(v_ctx, E'\n', ' | '), ''), 1200)::text
+      union all
+      select 9999, 'RESUMEN'::text, '0 pasan · 1 fallan · 0 omitidas'::text, '1 pruebas'::text,
+             'La batería se cayó: la fila 🔴 de arriba dice dónde. Nada de lo que hizo quedó en la base'::text, ''::text;
+    return;
+  end if;
+
+  return query
+    select x.n, x.regla, x.veredicto, x.prueba, x.esperado, x.obtenido
+      from jsonb_to_recordset(v_cuadro)
+        as x(n integer, regla text, veredicto text, prueba text, esperado text, obtenido text)
+     order by x.n;
+end $bateria$;
+
+-- Nadie la puede llamar por la API mientras exista (solo quien la creó, en el editor).
+revoke all on function public.probar_reglas_19() from public, anon, authenticated;
+
+select * from public.probar_reglas_19();

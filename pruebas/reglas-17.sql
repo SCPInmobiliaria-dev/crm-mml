@@ -69,6 +69,8 @@ language plpgsql set search_path = public as $bateria$
 #variable_conflict use_column
 declare
   v_cuadro jsonb;
+  v_caida  text;
+  v_ctx    text;
 begin
   -- Sin la migración que se prueba, no se corre nada: se dice qué falta.
   if not (to_regprocedure('public.fn_cerrar_separacion(uuid,text,text,date)') is not null and exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'unidades' and column_name = 'estado_comercial_previo')) then
@@ -1058,12 +1060,28 @@ order by n
     -- Deshacer TODO lo que hizo la batería (unidades, personas, separaciones,
     -- papeles, tablas y funciones temporales): un error atrapado justo abajo.
     raise exception using errcode = 'P0999', message = 'deshacer la batería';
-  exception when sqlstate 'P0999' then
-    null;
+  exception
+    when sqlstate 'P0999' then
+      null;
+    when others then
+      -- La batería se cayó a mitad de camino (p. ej. una regresión en la migración que prueba).
+      -- Lo que hizo ya se deshizo con el sub-bloque; el error no se esconde: sale como fila.
+      get stacked diagnostics v_ctx = pg_exception_context;
+      v_caida := sqlerrm;
   end;
 
   -- La función no se queda en la base: se borra a sí misma.
   execute 'drop function if exists public.probar_reglas_17()';
+
+  if v_caida is not null then
+    return query
+      select 1, 'CAÍDA'::text, '🔴 FALLA'::text, 'La batería llegó hasta el final sin caerse'::text, 'sin error'::text,
+             left(v_caida || ' · ' || coalesce(replace(v_ctx, E'\n', ' | '), ''), 1200)::text
+      union all
+      select 9999, 'RESUMEN'::text, '0 pasan · 1 fallan · 0 omitidas'::text, '1 pruebas'::text,
+             'La batería se cayó: la fila 🔴 de arriba dice dónde. Nada de lo que hizo quedó en la base'::text, ''::text;
+    return;
+  end if;
 
   return query
     select x.n, x.regla, x.veredicto, x.prueba, x.esperado, x.obtenido

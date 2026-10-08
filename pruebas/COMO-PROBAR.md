@@ -34,9 +34,10 @@ diría ✅ y la base seguiría abierta. **Hay que correr las dos.**
    Sin `04-seed-parametros` falla ya la preparación: `separaciones.plazo_parametro`
    referencia una fila de `parametros` que ese archivo siembra.
 
-2. **No hace falta un proyecto vacío.** Todo el archivo corre dentro de un
-   `begin … rollback`, así que al terminar la base queda exactamente como
-   estaba: ni una persona de prueba, ni una unidad, ni un parámetro tocado.
+2. **No hace falta un proyecto vacío.** Todo el archivo corre en una sola
+   sentencia que lo deshace al final (ver «Cómo corren las baterías» abajo), así
+   que al terminar la base queda exactamente como estaba: ni una persona de
+   prueba, ni una unidad, ni un parámetro tocado.
 
    Aun así, la primera vez córrelo en un proyecto de prueba. No por lo que hace
    —no deja rastro—, sino para que veas el resultado sin la presión de estar
@@ -45,6 +46,35 @@ diría ✅ y la base seguiría abierta. **Hay que correr las dos.**
 ---
 
 ## 3. Ejecutarlo en el SQL Editor de Supabase
+
+### Cómo corren las baterías (desde el 07/10/2026)
+
+`reglas.sql`, `reglas-13.sql`, `reglas-16.sql`, `reglas-17.sql` y `reglas-19.sql` son, cada una,
+**una función** (`public.probar_reglas_base`, `_13`, `_16`, `_17`, `_19`) que:
+
+1. si falta lo que necesita para correr, devuelve **una sola fila 🔴 `PRE`** que dice qué falta;
+2. hace todas las pruebas en **una sola sentencia**;
+3. lo **deshace todo** con un error atrapado a propósito (nada de lo que crea queda en la base);
+4. **se borra a sí misma** y devuelve el cuadro como filas (la fila `n = 9999` es el RESUMEN);
+5. si el cuerpo se cae a mitad de camino, devuelve **una sola fila 🔴 `CAÍDA`** con el error y su
+   contexto, y tampoco deja nada.
+
+Se pega entero y se pulsa Run; da igual que el editor mande todo junto o sentencia por sentencia.
+Cada una se ensayó en PGlite contra su original (`begin … rollback`) **en los dos modos**: mismas
+filas campo por campo, sin residuo (filas de todas las tablas, usuarios, funciones, triggers,
+constraints y políticas iguales antes y después), repetible, con la guardia y con una caída
+forzada, más decenas de mutaciones (13: 50 · 16: 37 · 19: 35 · base: 39) que la convertida atrapa
+exactamente igual que la original. 🟡 Todo en PGlite (superusuario, sin el esquema `extensions` ni
+el `auth` reales de Supabase): hasta ver el resultado en el SQL Editor real no se declara nada
+VALIDADO.
+
+La **guardia** solo exige lo que la batería necesita para *correr*, nunca lo que *defiende* (un
+trigger, una política): si eso falta, la batería corre y pone 🔴 las filas que lo prueban.
+
+Los huecos de las baterías que este ensayo destapó (mutaciones que ni la original ni la convertida
+atrapan) están en §12.
+
+### Pasos
 
 1. Abre tu proyecto en [supabase.com](https://supabase.com) → **SQL Editor** →
    **New query**.
@@ -60,14 +90,13 @@ script.
 - **Solo enseña el último resultado.** Por eso el archivo termina en un único
   `SELECT` que trae todas las filas y el resumen al final. Si partieras el
   archivo, perderías los cuadros intermedios.
-- **Puede avisar de que ya hay una transacción abierta** al llegar al `begin;`.
-  Es un aviso, no un error: el editor ya envolvía la consulta. El `rollback`
-  del final sigue deshaciendo todo igual.
-- **⚠️ No borres el `rollback` de la última línea.** Es lo único que impide que
-  este archivo deje basura en la base — y, peor, que deje `parametros` con el
-  plazo de juguete que usa la prueba R4b. (Aun así, R4b devuelve el parámetro a
-  su valor original por su cuenta, incluso si algo falla a mitad: dos redes, no
-  una.)
+- **No mantiene la transacción entre sentencias.** Por eso estas baterías ya
+  no usan `begin … rollback` ni tablas temporales entre sentencias (ver
+  «Cómo corren las baterías»): la primera corrida de `reglas-17.sql` falló con
+  `relation "resultado" does not exist` justo por eso.
+- **Si el editor pide confirmar una operación destructiva**, confirma: es la
+  función de prueba borrándose a sí misma (`drop function if exists`), no toca
+  datos reales.
 
 ---
 
@@ -152,9 +181,14 @@ montaje, no en una regla:
   `02-codigo/sql/` (§2).
 - `violates foreign key constraint "separaciones_plazo_parametro_fkey"` → falta
   `04-seed-parametros.sql`.
-- `duplicate key … unidades_codigo_unidad_key` sobre `PRUEBA-U1` → quedó basura
-  de una ejecución anterior a la que se le quitó el `rollback`. Bórrala a mano
-  y vuelve a poner el `rollback`.
+- Una sola fila 🔴 `PRE` que dice «falta aplicar …» → falta lo que la batería
+  necesita para correr (nombra qué). Aplícalo y vuelve a correrla.
+- Una sola fila 🔴 `CAÍDA` → la batería se cayó a mitad de camino (casi siempre
+  una regresión en lo que prueba): la fila trae el error y dónde ocurrió. No
+  dejó nada en la base.
+- `duplicate key … unidades_codigo_unidad_key` sobre `PRUEBA-U1` → solo puede
+  venir de una versión **vieja** de este archivo (con `begin … rollback`) a la
+  que se le quitó el `rollback`. Bórrala a mano y usa la versión nueva.
 
 ---
 
@@ -231,8 +265,8 @@ plpgsql solo se valida de verdad al correr: una columna mal escrita compila igua
 
 **En Supabase:** después de aplicar 13, SQL Editor → pegar `reglas-13.sql` entero → Run.
 Necesita un perfil activo de cada rol operativo (si falta uno, la fila PRE sale 🟡).
-Todo va entre `begin … rollback`. Lo esperado: la fila 9999 dice
-`30 pasan · 0 fallan · 0 omitidas`.
+Es una función de una sola sentencia que se deshace y se borra sola (ver «Cómo corren las
+baterías», §3). Lo esperado: la fila 9999 dice `30 pasan · 0 fallan · 0 omitidas`.
 
 ### 9.1 Ensayo local, sin tocar la base viva (arnés PGlite)
 
@@ -321,8 +355,10 @@ sentencia, lo deshace con un error atrapado a propósito, se **borra a sí misma
 cuadro como filas. Funciona igual tanto si el editor manda todo junto como si lo corta sentencia
 por sentencia (ensayado de las dos formas en PGlite, sin dejar ni una fila, y con las mutaciones de
 §11 atrapadas). Si 17 no está aplicado, sale una sola fila 🔴 diciéndolo, en vez de reventar.
-`pruebas/convertir-bateria.mjs` hace esta conversión para las demás baterías (13, 15, 16, 19, 20 y
-`reglas.sql` siguen con el formato viejo y tendrán el mismo problema en el editor).
+Lo mismo se hizo con `reglas.sql`, 13, 16 y 19 (ver «Cómo corren las baterías», §3).
+`pruebas/convertir-bateria.mjs` hace la conversión. **Quedan con el formato viejo** `reglas-15.sql` y
+`reglas-20.sql` (archivos de otra sesión, sin commit en este repo): tendrán el mismo problema en el
+editor hasta que se conviertan.
 
 **Ojo con 20:** si `sql/20-inventario-publico-como-crm.sql` está aplicado, `reglas-16.sql` (filas 7
 y 9) y `reglas-19.sql` (fila 14) fallan porque siguen exigiendo las claves EXACTAS de antes de 20
@@ -332,4 +368,27 @@ junto con 20.
 | Fecha | Dónde | Resultado |
 |---|---|---|
 | 07/10/2026 | PGlite local (01..14 + 16 + 18 + 19 + 17, y también con 20) | 30 pasan · 0 fallan · 0 omitidas (cinco mutaciones de las reglas de cierre, atrapadas); 17 dos veces sin cambios; 13, 16, 19 y `reglas.sql` sin regresiones |
-| — | Supabase (proyecto real) | [PENDIENTE] |
+| 07/10/2026 | Supabase (proyecto real, SQL Editor), `reglas-17.sql` en su versión anterior (función de una sola sentencia, sin el usuario de lectura de mentira) | 29 pasan · 0 fallan · 1 omitidas: la omitida es la fila PRE, porque el proyecto no tiene ningún usuario activo de lectura o contabilidad (reproducido en PGlite: es la única combinación que da exactamente ese cuadro). 🟡 TIT y DOC pasaban «en vacío» en esa versión; ya corregido |
+| 07/10/2026 | PGlite local, `reglas.sql`, 13, 16, 17 y 19 convertidas al formato de una función | Cada una: mismas filas que su original campo por campo en los dos modos del editor, sin residuo, repetible, con guardia y con caída forzada (ver §3). base 30·0·1 conocida · 13 30·0·0 · 16 16·0·1 omitida · 17 30·0·0 · 19 20·0·0 |
+| — | Supabase (proyecto real), versiones nuevas de las cinco | [PENDIENTE] |
+
+---
+
+## 12. Huecos que destapó el ensayo de las baterías (🟡 por cerrar)
+
+Al convertir las baterías para el SQL Editor (§3) se les aplicaron decenas de **mutaciones**: se rompe a
+propósito una regla en la migración y se comprueba que la batería se pone 🔴. Casi todas se atrapan igual
+en la original y en la convertida. Estas **no las atrapa ninguna de las dos**: son huecos de la batería,
+no de la conversión. Falta decidir cuáles se cierran y con qué prueba (🔵 propuesta; no se tocó ninguna
+prueba por esto).
+
+| Batería | Mutación que pasa sin que nadie se entere | Por qué importa |
+|---|---|---|
+| 13 | R5: la regla exige solo 3 de las 4 respuestas de cualificación | La prueba 11 solo comprueba que falte `compro_antes`; faltaría probar cada una de las cuatro por separado (R5 es la regla que impide que el embudo mienta) |
+| 19 | `fn_asignar_precio` no valida que lo recibido sea un precio (la moneda lo tapa) | Un texto o un valor absurdo podría llegar a `unidades` |
+| 19 | El tope de 2000 unidades por llamada sube a 20000 | El límite existe para que un error de la pantalla no reescriba todo el inventario |
+| 19 | `fn_asignar_precio` no comprueba que el parámetro del nivel exista | Un nivel inexistente se asignaría sin error |
+
+Otras mutaciones tampoco se atrapan pero **no son huecos**: son equivalentes (el agregado lateral de
+`v_cartera` nunca da NULL, así que quitar el `coalesce` no cambia nada) o son escenarios de control
+de la 16 (sin perfil comercial, sin mutación) cuyo resultado esperado es 🟡 OMITIDA.
