@@ -42,10 +42,11 @@
 -- REQUISITOS
 -- ---------------------------------------------------------------------
 -- 01..14, 16, 18 y 19 aplicados y DESPUÉS 17-inventario-maestro.sql (15 y 20
--- dan igual; sin 16 las comprobaciones contra la web no se hacen). Hace falta un perfil activo de cada rol:
--- direccion, administracion, comercial y uno de lectura o contabilidad; sin
--- ellos, la fila PRE sale 🟡 OMITIDA y las pruebas que lo necesitan fallan
--- con su mensaje.
+-- dan igual; sin 16 las comprobaciones contra la web no se hacen). Hace falta un perfil activo de
+-- direccion, administracion y comercial; sin ellos, la fila PRE sale 🟡 OMITIDA y las pruebas
+-- que lo necesitan fallan con su mensaje. El de lectura/contabilidad, si el proyecto no tiene
+-- ninguno, se crea DE MENTIRA (auth.users → t_nuevo_usuario) y se deshace con todo lo demás; si
+-- no se puede crear, las dos comprobaciones que lo suplantan salen 🟡 OMITIDA (no ✅ en vacío).
 -- SUPLANTACIÓN: como reglas-13 — claims del JWT con set_config; para RLS,
 -- `set local role authenticated` (o `anon`).
 -- =====================================================================
@@ -104,6 +105,22 @@ returns void language sql as $$
           case when coalesce(p_ok, false) then '✅ PASA' else '🔴 FALLA' end)
 $$;
 
+-- Como anotar(), para una comprobación que incluye a un actor de LECTURA. Si ese perfil no
+-- existe (ni se pudo crear uno de mentira, ver PRE), esa parte NO se probó: la fila sale
+-- 🟡 OMITIDA y lo dice, en vez de dar ✅ por haber suplantado a «nadie» (un actor sin perfil
+-- siempre es rechazado, y eso no prueba nada sobre el rol de lectura).
+create function pg_temp.anotar_lec(p_regla text, p_prueba text, p_esperado text, p_obtenido text,
+                                   p_ok_resto boolean, p_ok_lec boolean, p_sin_perfil boolean)
+returns void language sql as $$
+  insert into resultado (regla, prueba, esperado, obtenido, veredicto)
+  values (p_regla, p_prueba, p_esperado,
+          coalesce(p_obtenido, '(nulo)') || case when p_sin_perfil then ' · lectura: SIN PERFIL, esa parte no se probó' else '' end,
+          case when not coalesce(p_ok_resto, false) then '🔴 FALLA'
+               when p_sin_perfil then '🟡 OMITIDA'
+               when coalesce(p_ok_lec, false) then '✅ PASA'
+               else '🔴 FALLA' end)
+$$;
+
 create function pg_temp.f(p_clave text) returns uuid language sql stable as $$
   select id from fixture where clave = p_clave
 $$;
@@ -152,7 +169,7 @@ begin
 end $$;
 
   -- (bloque)
-declare v_n integer; v_fn boolean;
+declare v_n integer; v_fn boolean; v_lec_nuevo uuid; v_falta text; v_nota text := null;
 begin
   insert into fixture select 'direccion', id from perfiles
    where rol = 'direccion' and activo order by creado_el limit 1;
@@ -162,12 +179,36 @@ begin
    where rol = 'comercial' and activo order by creado_el limit 1;
   insert into fixture select 'lector', id from perfiles
    where rol in ('lectura', 'contabilidad') and activo order by (rol = 'lectura') desc, creado_el limit 1;
-  select count(*) into v_n from fixture;
+  -- El proyecto puede no tener todavía ningún usuario de lectura/contabilidad. Todo usuario nace
+  -- 'lectura' (t_nuevo_usuario), así que se crea uno DE MENTIRA, que se deshace con el resto de
+  -- la batería (nunca llega a existir de verdad). Si el proyecto no deja crearlo, no se inventa
+  -- nada: el actor queda sin perfil y las pruebas de lectura salen 🟡 OMITIDA (anotar_lec).
+  if not exists (select 1 from fixture where clave = 'lector') then
+    begin
+      v_lec_nuevo := gen_random_uuid();
+      insert into auth.users (id, email) values (v_lec_nuevo, 'prueba17-lector@example.invalid');
+      insert into fixture select 'lector', id from perfiles where id = v_lec_nuevo and rol = 'lectura' and activo;
+      if exists (select 1 from fixture where clave = 'lector') then
+        v_nota := 'lectura: usuario de mentira, creado y deshecho por la batería';
+      end if;
+    exception when others then
+      delete from fixture where clave = 'lector';
+      v_nota := 'lectura: no se pudo crear un usuario de mentira (' || left(sqlerrm, 60) || ')';
+    end;
+  end if;
+  select count(*) into v_n from fixture where clave in ('direccion', 'administracion', 'comercial', 'lector');
+  select nullif(concat_ws(', ',
+           case when not exists (select 1 from fixture where clave = 'direccion') then 'dirección' end,
+           case when not exists (select 1 from fixture where clave = 'administracion') then 'administración' end,
+           case when not exists (select 1 from fixture where clave = 'comercial') then 'comercial' end,
+           case when not exists (select 1 from fixture where clave = 'lector') then 'lectura/contabilidad' end), '')
+    into v_falta;
   v_fn := to_regprocedure('public.fn_guardar_titular_unidad(uuid,uuid,text,text,text,text,text,text,text)') is not null;
   insert into resultado (regla, prueba, esperado, obtenido, veredicto) values
   ('PRE', 'sql/17 aplicado y hay un perfil activo de dirección, administración, comercial y lectura/contabilidad',
    'función sí · 4 de 4 perfiles',
-   concat_ws(' · ', 'función ' || case when v_fn then 'sí' else 'NO' end, v_n || ' de 4 perfiles'),
+   concat_ws(' · ', 'función ' || case when v_fn then 'sí' else 'NO' end, v_n || ' de 4 perfiles',
+             case when v_falta is not null then 'FALTA: ' || v_falta end, v_nota),
    case when not v_fn then '🔴 FALLA' when v_n = 4 then '✅ PASA' else '🟡 OMITIDA' end);
 end;
 
@@ -525,11 +566,15 @@ begin
   exception when others then f_com := true; m_com := sqlerrm; end;
   execute 'reset role';
 
-  perform pg_temp.como(v_lec);
-  execute 'set local role authenticated';
-  begin perform fn_guardar_titular_unidad(v_u, null, 'PRUEBA17 Intruso', null, null, null, null, null, null);
-  exception when others then f_lec := true; m_lec := sqlerrm; end;
-  execute 'reset role';
+  if v_lec is null then
+    m_lec := '(sin perfil de lectura)';
+  else
+    perform pg_temp.como(v_lec);
+    execute 'set local role authenticated';
+    begin perform fn_guardar_titular_unidad(v_u, null, 'PRUEBA17 Intruso', null, null, null, null, null, null);
+    exception when others then f_lec := true; m_lec := sqlerrm; end;
+    execute 'reset role';
+  end if;
 
   update perfiles set activo = false where id = v_dir;
   perform pg_temp.como(v_dir);
@@ -546,14 +591,15 @@ begin
   execute 'reset role';
 
   select titular_persona_id into v_tit from unidades where id = v_u;
-  perform pg_temp.anotar('TIT', 'Comercial, lectura, un usuario de dirección desactivado y anon no pueden cambiar el titular',
+  perform pg_temp.anotar_lec('TIT', 'Comercial, lectura, un usuario de dirección desactivado y anon no pueden cambiar el titular',
     '«Solo Dirección o Administración» ×3 · anon sin EXECUTE · la unidad no cambió',
     concat_ws(' · ', left(m_com, 30), left(m_lec, 30), left(m_ina, 30), left(m_anon, 40), 'titular de u_d: ' || coalesce(v_tit::text, 'ninguno')),
     pg_temp.veredicto_error(f_com, m_com, 'Solo Dirección o Administración')
-      and pg_temp.veredicto_error(f_lec, m_lec, 'Solo Dirección o Administración')
       and pg_temp.veredicto_error(f_ina, m_ina, 'Solo Dirección o Administración')
       and f_anon and strpos(m_anon, 'permission denied') > 0
-      and v_tit is distinct from null);
+      and v_tit is distinct from null,
+    pg_temp.veredicto_error(f_lec, m_lec, 'Solo Dirección o Administración'),
+    v_lec is null);
 exception when others then
   execute 'reset role';
   update perfiles set activo = true where id = v_dir;
@@ -671,17 +717,21 @@ begin
   select count(*) into n_adm from documentos where unidad_id = v_u;  execute 'reset role';
   perform pg_temp.como(v_com);  execute 'set local role authenticated';
   select count(*) into n_com from documentos where unidad_id = v_u;  execute 'reset role';
-  perform pg_temp.como(v_lec);  execute 'set local role authenticated';
-  select count(*) into n_lec from documentos where unidad_id = v_u;  execute 'reset role';
+  if v_lec is not null then
+    perform pg_temp.como(v_lec);  execute 'set local role authenticated';
+    select count(*) into n_lec from documentos where unidad_id = v_u;  execute 'reset role';
+  end if;
   update perfiles set activo = false where id = v_dir;
   perform pg_temp.como(v_dir);  execute 'set local role authenticated';
   select count(*) into n_ina from documentos where unidad_id = v_u;  execute 'reset role';
   update perfiles set activo = true where id = v_dir;
   perform pg_temp.como(null);
-  perform pg_temp.anotar('DOC', 'Leen los papeles de una unidad: dirección y administración sí (2); comercial, lectura y un usuario desactivado no (0)',
+  perform pg_temp.anotar_lec('DOC', 'Leen los papeles de una unidad: dirección y administración sí (2); comercial, lectura y un usuario desactivado no (0)',
     'dirección 2 · administración 2 · comercial 0 · lectura 0 · desactivado 0',
-    format('dirección %s · administración %s · comercial %s · lectura %s · desactivado %s', n_dir, n_adm, n_com, n_lec, n_ina),
-    n_dir = 2 and n_adm = 2 and n_com = 0 and n_lec = 0 and n_ina = 0);
+    format('dirección %s · administración %s · comercial %s · lectura %s · desactivado %s', n_dir, n_adm, n_com, coalesce(n_lec::text, '—'), n_ina),
+    n_dir = 2 and n_adm = 2 and n_com = 0 and n_ina = 0,
+    n_lec = 0,
+    v_lec is null);
 exception when others then
   execute 'reset role';
   update perfiles set activo = true where id = v_dir;

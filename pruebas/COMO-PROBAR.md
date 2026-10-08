@@ -299,8 +299,19 @@ declara nada VALIDADO.
 | DOC | Papeles de una unidad: solo Dirección y Administración los suben y los leen (tabla y bucket); persona o unidad obligatoria; tipos nuevos; archivar con motivo; los documentos de una persona siguen igual |
 
 **En Supabase:** después de aplicar 17, SQL Editor → pegar `reglas-17.sql` entero → Run. Necesita
-un perfil activo de dirección, administración, comercial y lectura o contabilidad (si falta uno, la
-fila PRE sale 🟡). Lo esperado: la fila 9999 dice `30 pasan · 0 fallan · 0 omitidas`.
+un perfil activo de dirección, administración y comercial. Lo esperado: la fila 9999 dice
+`30 pasan · 0 fallan · 0 omitidas`.
+
+**El perfil de lectura.** Si el proyecto no tiene ningún usuario activo de lectura o contabilidad,
+la batería crea uno **de mentira** (inserta en `auth.users`; el disparador `t_nuevo_usuario` le da
+el perfil `lectura`) y lo deshace con todo lo demás: la fila PRE lo dice («usuario de mentira,
+creado y deshecho por la batería») y no queda ningún usuario nuevo. Si el proyecto no deja crearlo,
+no se inventa nada: PRE sale 🟡 con `FALTA: lectura/contabilidad` y las dos comprobaciones que
+suplantan a ese rol (`TIT` «quién no puede cambiar el titular» y `DOC` «quién lee los papeles»)
+salen 🟡 **OMITIDA** (`27 pasan · 0 fallan · 3 omitidas`). Antes del 07/10/2026 esas dos pasaban ✅
+sin lector, pero «en vacío»: un actor sin perfil siempre es rechazado, y eso no prueba nada sobre el
+rol de lectura. Si falta dirección, administración o comercial, fallan de 4 a 15 pruebas con su
+mensaje, a propósito.
 
 **Por qué ya no va entre `begin … rollback` (07/10/2026).** La primera corrida en el SQL Editor
 falló al instante con `relation "resultado" does not exist`: el editor no mantuvo la transacción
