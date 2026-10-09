@@ -26,9 +26,11 @@
 -- ---------------------------------------------------------------------
 -- ESTE ARCHIVO NO DEJA RASTRO
 -- ---------------------------------------------------------------------
--- Todo va dentro de `begin … rollback`: personas, oportunidades, tareas,
--- visitas, perfiles y el rol cambiado un momento para la prueba de `lectura`
--- se deshacen al final. ⚠️ NO borres el `rollback` del final.
+-- Todo va dentro de UNA función que se deshace sola (ver «CÓMO SE CORRE», más
+-- abajo): personas, oportunidades, tareas, visitas, perfiles, documentos y el
+-- rol cambiado un momento para la prueba de `lectura` se deshacen al final.
+-- ⚠️ No quites el `raise exception … P0999` del final de la función: es lo que
+-- lo deshace todo.
 --
 -- ---------------------------------------------------------------------
 -- AQUÍ NO HAY NI UNA CIFRA DEL NEGOCIO
@@ -43,7 +45,8 @@
 -- ---------------------------------------------------------------------
 -- REQUISITOS
 -- ---------------------------------------------------------------------
--- 01..12 aplicados y DESPUÉS 13-seguimiento-comercial.sql. Un perfil activo
+-- 01..12 aplicados y DESPUÉS 13-seguimiento-comercial.sql (14, 16, 17, 18 y 19 dan
+-- igual; sin 13 sale una sola fila 🔴 que lo dice). Un perfil activo
 -- de cada rol operativo (comercial, direccion, administracion): `perfiles.id`
 -- referencia `auth.users` y no se puede inventar uno. Sin ellos, casi todo
 -- sale 🔴 con el motivo en «obtenido» y la fila PRE dice por qué.
@@ -52,9 +55,40 @@
 -- JWT puestos (auth.uid() los lee); las pruebas de RLS cambian además a
 -- `set local role authenticated`, que es el rol con el que llega la app.
 -- =====================================================================
+--
+-- ---------------------------------------------------------------------
+-- CÓMO SE CORRE (versión de una sola sentencia, 07/10/2026)
+-- ---------------------------------------------------------------------
+-- El SQL Editor de Supabase no siempre mantiene un `begin … rollback` entre
+-- sentencias: la primera corrida de la batería 17 falló con «relation
+-- "resultado" does not exist» porque la tabla temporal ya se había borrado.
+-- Por eso ahora TODO va dentro de una función: corre en una sola sentencia,
+-- lo deshace todo al final (un error atrapado a propósito: nada de lo que
+-- crea queda en la base) y devuelve el cuadro como filas. La función se
+-- borra sola al terminar. Se pega entero y se pulsa Run; da igual el editor.
+-- =====================================================================
 
-begin;
-
+create or replace function public.probar_reglas_13()
+returns table (n integer, regla text, veredicto text, prueba text, esperado text, obtenido text)
+language plpgsql set search_path = public as $bateria$
+#variable_conflict use_column
+declare
+  v_cuadro jsonb;
+  v_caida  text;
+  v_ctx    text;
+begin
+  -- Sin la migración que se prueba, no se corre nada: se dice qué falta.
+  if not (to_regprocedure('public.fn_registrar_prospecto(jsonb,boolean)') is not null and to_regprocedure('public.fn_archivar_documento(uuid,text)') is not null and to_regclass('public.visitas') is not null and to_regclass('public.v_cartera') is not null) then
+    return query
+      select 1, 'PRE'::text, '🔴 FALLA'::text, 'La migración está aplicada'::text, 'sí'::text,
+             'NO: falta aplicar sql/13-seguimiento-comercial.sql en el SQL Editor. Aplícala primero y vuelve a correr esta batería.'::text
+      union all
+      select 9999, 'RESUMEN'::text, '0 pasan · 1 fallan · 0 omitidas'::text, '1 pruebas'::text,
+             'Mira las filas 🔴 de arriba: son las únicas que exigen algo'::text, ''::text;
+    execute 'drop function if exists public.probar_reglas_13()';
+    return;
+  end if;
+  begin
 -- @@INICIO_CUERPO (el ensayo de SPEC §4.9 envía desde aquí hasta @@FIN_CUERPO)
 
 -- ---------------------------------------------------------------------
@@ -111,7 +145,7 @@ create function pg_temp.datos(p_nombre text, p_tel text) returns jsonb language 
   select pg_temp.comun() || jsonb_build_object('nombre', p_nombre, 'telefono', p_tel)
 $$;
 
-do $$
+  <<bloque_1>>
 declare v_n integer;
 begin
   insert into fixture select 'comercial', id from perfiles
@@ -124,7 +158,7 @@ begin
   insert into resultado (regla, prueba, esperado, obtenido, veredicto) values
   ('PRE', 'Hay un perfil activo de cada rol operativo (comercial, direccion, administracion)',
    'los tres', v_n || ' de 3', case when v_n = 3 then '✅ PASA' else '🟡 OMITIDA' end);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -132,7 +166,7 @@ end $$;
 -- ---------------------------------------------------------------------
 
 -- 1a · R6 desde el alta: persona + oportunidad 01 + tarea abierta con fecha.
-do $$
+  <<bloque_2>>
 declare v jsonb; v_op uuid; v_ok boolean;
 begin
   perform pg_temp.como(pg_temp.f('comercial'));
@@ -151,11 +185,11 @@ begin
 exception when others then
   perform pg_temp.anotar('R6', 'fn_registrar_prospecto crea persona + oportunidad 01 + tarea «Primer contacto» abierta',
     'accion creada, tarea primer_contacto abierta con fecha', sqlerrm, false);
-end $$;
+end;
 
 -- 1b · El mismo teléfono, registrado por OTRO usuario: se reutiliza, no se
 -- duplica y no cambia de dueño (lo que fn_registro_rapido no sabía hacer).
-do $$
+  <<bloque_3>>
 declare v jsonb; v_n integer; v_ok boolean;
 begin
   perform pg_temp.como(pg_temp.f('direccion'));
@@ -174,11 +208,11 @@ begin
 exception when others then
   perform pg_temp.anotar('DEDUP', 'El mismo teléfono registrado por otro usuario reutiliza la oportunidad viva',
     'oportunidad_reutilizada, responsable_otro, 1 sola oportunidad viva', sqlerrm, false);
-end $$;
+end;
 
 -- 1c · Lote SIMULADO: marca el repetido dentro de la lista y el teléfono
 -- inválido, con índice 0-based, y no escribe NADA.
-do $$
+  <<bloque_4>>
 declare v jsonb; v_escritas integer; v_ok boolean;
 begin
   perform pg_temp.como(pg_temp.f('comercial'));
@@ -206,11 +240,11 @@ begin
 exception when others then
   perform pg_temp.anotar('LOTE', 'fn_registrar_lote simulado: repetido en la lista + teléfono inválido, sin escribir',
     '1 válida, 2 con error (repetido fila 1, E.164), 0 personas escritas', sqlerrm, false);
-end $$;
+end;
 
 -- 1d · Lote REAL con «repartir entre»: las oportunidades nuevas se reparten
 -- por turnos, en el orden de la lista.
-do $$
+  <<bloque_5>>
 declare v jsonb; v_ok boolean;
 begin
   perform pg_temp.como(pg_temp.f('direccion'));
@@ -239,7 +273,7 @@ begin
 exception when others then
   perform pg_temp.anotar('LOTE', 'fn_registrar_lote real con repartir_entre alterna los dueños',
     '2 creadas: fila 0 → comercial, fila 1 → administracion', sqlerrm, false);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -248,7 +282,7 @@ end $$;
 
 -- 2a · N× «no contesta» (N = parametros.frio_intentos_sin_respuesta): pasa a
 -- fríos justo en el intento N, ni uno antes, y deja la tarea de reactivación.
-do $$
+  <<bloque_6>>
 declare v jsonb; v_umbral integer; k integer; v_antes boolean := false; v_marcas text[] := '{}'; v_ok boolean;
 begin
   perform pg_temp.como(pg_temp.f('comercial'));
@@ -258,7 +292,7 @@ begin
     insert into resultado (regla, prueba, esperado, obtenido, veredicto) values
     ('FRIOS', 'N intentos sin respuesta mandan el lead a fríos', 'pausada en el intento N',
      'parametros.frio_intentos_sin_respuesta vacío o no operativo', '🟡 OMITIDA');
-    return;
+    exit bloque_6;
   end if;
   for k in 1 .. v_umbral loop
     v := fn_registrar_contacto(pg_temp.f('op_ana'), 'no_contesta', 'llamada');
@@ -285,10 +319,10 @@ exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('FRIOS', 'N intentos sin respuesta mandan el lead a fríos',
     'paso_a_frios solo en el intento N', sqlerrm, false);
-end $$;
+end;
 
 -- 2b · R9 fuera del embudo: el paso a fríos deja su evento con actor y motivo.
-do $$
+  <<bloque_7>>
 declare v_ok boolean; v_obt text;
 begin
   select true, e.de || '→' || e.a || ' · ' || coalesce(e.motivo, '(sin motivo)')
@@ -300,10 +334,10 @@ begin
    order by e.id desc limit 1;
   perform pg_temp.anotar('R9', 'El cambio de situación queda en oportunidad_eventos con actor y motivo',
     'situacion activa→pausada, actor comercial, motivo «Pasó a fríos…»', coalesce(v_obt, 'sin evento'), v_ok);
-end $$;
+end;
 
 -- 2c · Una respuesta mueve 01→02 y estado_historial.motivo por fin se llena.
-do $$
+  <<bloque_8>>
 declare v jsonb; v_mot text; v_ok boolean;
 begin
   perform pg_temp.como(pg_temp.f('comercial'));
@@ -323,11 +357,11 @@ exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('R9', 'Contacto positivo mueve 01→02 con estado_historial.motivo',
     'estado 02_contactado, motivo «Respondió: …»', sqlerrm, false);
-end $$;
+end;
 
 -- 2d · «No contactar» (Ley 29733): la persona queda marcada, sin
 -- consentimiento, su oportunidad perdida y sin una sola tarea abierta.
-do $$
+  <<bloque_9>>
 declare v jsonb; v_abiertas integer; v_ok boolean;
 begin
   perform pg_temp.como(pg_temp.f('administracion'));
@@ -349,7 +383,7 @@ exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('LEY29733', 'pidio_no_contacto: no_contactar + consentimiento false + perdida + 0 tareas abiertas',
     'todo eso', sqlerrm, false);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -357,7 +391,7 @@ end $$;
 -- ---------------------------------------------------------------------
 
 -- 3a · R7: un capital sin moneda no se guarda.
-do $$
+  <<bloque_10>>
 declare v_fallo boolean := false; v_msg text := 'se guardó sin error';
 begin
   perform pg_temp.como(pg_temp.f('comercial'));
@@ -369,11 +403,11 @@ begin
   insert into resultado (regla, prueba, esperado, obtenido, veredicto) values
   ('R7', 'fn_guardar_perfil con capital_monto y sin capital_moneda', '❌ ERROR citando capital_con_moneda',
    v_msg, pg_temp.veredicto_error(v_fallo, v_msg, 'capital_con_moneda'));
-end $$;
+end;
 
 -- 3b · R5 vía perfil: con 3 de las 4 respuestas, faltan dice cuál y la base
 -- no deja pasar a 06.
-do $$
+  <<bloque_11>>
 declare v jsonb; v_fallo boolean := false; v_msg text := 'pasó a 06 sin error'; v_ok boolean;
 begin
   perform pg_temp.como(pg_temp.f('comercial'));
@@ -394,11 +428,11 @@ exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('R5', 'Perfil con 3 de 4 respuestas: faltan = compro_antes y no se llega a 06',
     'faltan ["compro_antes"] y ERROR de R5', sqlerrm, false);
-end $$;
+end;
 
 -- 3c · R5 vía perfil: con la cuarta respuesta, la cualificación está completa
 -- y 06 ya es posible.
-do $$
+  <<bloque_12>>
 declare v jsonb; v_msg text := 'ok'; v_ok boolean;
 begin
   perform pg_temp.como(pg_temp.f('comercial'));
@@ -416,7 +450,7 @@ exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('R5', 'Perfil con las 4 respuestas: cualificación completa y 06 permitido',
     'cualificacion_completa true', sqlerrm, false);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -425,7 +459,7 @@ end $$;
 
 -- 4a · Agendar deja DOS tareas ligadas a la visita (la visita y su
 -- confirmación) y el UID del .ics es el id de la visita, secuencia 0.
-do $$
+  <<bloque_13>>
 declare v jsonb; v_horas integer; v_inicio timestamptz; v_vis uuid; v_n integer; v_ok boolean;
 begin
   perform pg_temp.como(pg_temp.f('comercial'));
@@ -435,7 +469,7 @@ begin
     insert into resultado (regla, prueba, esperado, obtenido, veredicto) values
     ('VISITA', 'Agendar una visita deja 2 tareas (visita + confirmar)', '2 tareas',
      'parametros.visita_confirmar_horas_antes vacío: no se crea la de confirmar', '🟡 OMITIDA');
-    return;
+    exit bloque_13;
   end if;
   v_inicio := now() + make_interval(hours => v_horas + 48);
   v := fn_agendar_visita(pg_temp.f('op_caro'), 'obra', v_inicio);
@@ -452,10 +486,10 @@ exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('VISITA', 'Agendar una visita deja 2 tareas (visita + confirmar) y ics_uid = id',
     '2 tareas abiertas ligadas', sqlerrm, false);
-end $$;
+end;
 
 -- 4b · Una segunda visita abierta se rechaza con su mensaje.
-do $$
+  <<bloque_14>>
 declare v_fallo boolean := false; v_msg text := 'se agendó otra sin error';
 begin
   perform pg_temp.como(pg_temp.f('comercial'));
@@ -467,11 +501,11 @@ begin
   insert into resultado (regla, prueba, esperado, obtenido, veredicto) values
   ('VISITA', 'Segunda visita abierta para la misma oportunidad', '❌ ERROR «Ya tiene una visita agendada…»',
    v_msg, pg_temp.veredicto_error(v_fallo, v_msg, 'Ya tiene una visita agendada'));
-end $$;
+end;
 
 -- 4c · Reprogramar CONSERVA el UID y sube la secuencia (RFC 5545): el
 -- calendario del cliente mueve el evento en vez de duplicarlo.
-do $$
+  <<bloque_15>>
 declare v jsonb; v_prev uuid := pg_temp.f('visita1'); v_ok boolean; v_est text; v_viejas integer; v_nuevas integer;
 begin
   perform pg_temp.como(pg_temp.f('comercial'));
@@ -491,7 +525,7 @@ begin
 exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('VISITA', 'Reprogramar conserva ics_uid y sube ics_secuencia', 'mismo uid, secuencia 1', sqlerrm, false);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -500,7 +534,7 @@ end $$;
 
 -- Preparación: Eva, de dirección, con perfil; Fito, con perfil y SIN dueño
 -- (como un lead que entró solo por la web).
-do $$
+  <<bloque_16>>
 declare v jsonb;
 begin
   perform pg_temp.como(pg_temp.f('direccion'));
@@ -515,10 +549,10 @@ begin
 exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('PREP', 'Preparación de las pruebas de RLS (Eva con dueño, Fito sin dueño)', 'sin error', sqlerrm, false);
-end $$;
+end;
 
 -- 5a y 5b · Con el rol `authenticated` de verdad, como el comercial.
-do $$
+  <<bloque_17>>
 declare v_eva uuid := pg_temp.f('op_eva'); v_fito uuid := pg_temp.f('op_fito');
         v_perf_eva integer; v_perf_fito integer; v_op_eva integer; v_op_fito integer;
 begin
@@ -540,11 +574,11 @@ exception when others then
   execute 'reset role';
   perform pg_temp.como(null);
   perform pg_temp.anotar('RLS', 'Lectura del perfil como comercial', '0 ajeno / 1 sin dueño', sqlerrm, false);
-end $$;
+end;
 
 -- 5c · La bandeja lo muestra y «Tomar» lo gana el primero: el segundo recibe
 -- «Ya la tomó …» y el lead no cambia de manos.
-do $$
+  <<bloque_18>>
 declare v1 jsonb; v2 jsonb; v_en_bandeja boolean; v_ok boolean;
 begin
   perform pg_temp.como(pg_temp.f('comercial'));
@@ -566,11 +600,11 @@ begin
 exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('BANDEJA', 'fn_bandeja + fn_reclamar_oportunidad (gana el primero)', 'el primero gana', sqlerrm, false);
-end $$;
+end;
 
 -- 5d · R9: el cambio de responsable y la toma quedan en la línea de tiempo,
 -- con el NOMBRE (un vendedor no puede leer `perfiles` de otros).
-do $$
+  <<bloque_19>>
 declare v_ok boolean;
 begin
   v_ok := exists (select 1 from oportunidad_eventos e
@@ -583,13 +617,13 @@ begin
     'evento responsable → nombre del comercial + evento bandeja «tomada»',
     (select string_agg(e.tipo || ':' || coalesce(e.de, '∅') || '→' || coalesce(e.a, '∅'), ' | ' order by e.id)
        from oportunidad_eventos e where e.oportunidad_id = pg_temp.f('op_fito')), v_ok);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
 -- 6 · R8 EN LAS TABLAS NUEVAS Y EN TAREAS
 -- ---------------------------------------------------------------------
-do $$
+  <<bloque_20>>
 declare v_doc uuid; v_fallo boolean; v_msg text; v_rep text := '';
         v_malas integer := 0;
 begin
@@ -627,7 +661,7 @@ begin
     '❌ los cuatro rechazados con su mensaje (R8 / de solo agregar, R9)', v_rep, v_malas = 0);
 exception when others then
   perform pg_temp.anotar('R8', 'DELETE en visitas, tareas, documentos y oportunidad_eventos', 'los cuatro rechazados', sqlerrm, false);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -636,7 +670,7 @@ end $$;
 
 -- 7a · anon no ejecuta nada de lo nuevo ni las cuatro de ayuda de 1b;
 -- fn_captar_prospecto conserva su grant (la web la necesita).
-do $$
+  <<bloque_21>>
 declare v_total integer; v_con_anon text; v_captar boolean; v_auth boolean;
 begin
   select count(*),
@@ -659,10 +693,10 @@ begin
     concat_ws(' · ', v_total || ' funciones', 'con anon: ' || coalesce(v_con_anon, 'ninguna'),
               'captar anon ' || v_captar, 'authenticated ' || v_auth),
     v_total = 27 and v_con_anon is null and v_captar and v_auth);
-end $$;
+end;
 
 -- 7b · Las auxiliares internas solo las ejecuta su dueño.
-do $$
+  <<bloque_22>>
 declare v_con text;
 begin
   select string_agg(p.proname, ', ') into v_con
@@ -675,7 +709,7 @@ begin
           or has_function_privilege('anon', p.oid, 'EXECUTE'));
   perform pg_temp.anotar('SEG', 'Las 12 auxiliares internas no las ejecutan ni authenticated ni anon',
     'ninguna', coalesce(v_con, 'ninguna'), v_con is null);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -684,7 +718,7 @@ end $$;
 
 -- 8a · El contrato con src/lib/cartera.ts: columnas en el orden EXACTO de
 -- SPEC §4.6 (create or replace view solo deja añadir al final).
-do $$
+  <<bloque_23>>
 declare v_real text; v_contrato text :=
   'id,persona_id,nombre_completo,telefono_e164,usuario_red,red_social,email,origen,campana_id,campana_nombre,'
   'lanzamiento,estado,situacion,responsable_id,responsable_nombre,sin_dueno,entro_solo,fecha_ingreso,'
@@ -701,12 +735,12 @@ begin
   perform pg_temp.anotar('CONTRATO', 'v_cartera tiene las columnas de SPEC §4.6 en su orden',
     'idénticas', case when v_real = v_contrato then 'idénticas' else coalesce(v_real, 'sin vista') end,
     v_real = v_contrato);
-end $$;
+end;
 
 -- 8b · Ningún booleano ni conteo de v_cartera llega NULL (los filtros de la
 -- pantalla usan .eq('no_contactar', false): un NULL escondería la fila), y
 -- cada caso de prueba sale con su temperatura.
-do $$
+  <<bloque_24>>
 declare v_nulos integer; v_filas integer; v_vivas integer; v_ana text; v_dani text; v_caro text; v_eva text;
 begin
   perform pg_temp.como(pg_temp.f('direccion'));   -- para que parametro_entero lea los umbrales
@@ -731,10 +765,10 @@ begin
               'Caro ' || coalesce(v_caro, '?'), 'Eva ' || coalesce(v_eva, '?')),
     v_nulos = 0 and v_filas = v_vivas and v_ana = 'frio' and v_dani = 'no_contactar'
       and v_caro = 'caliente' and v_eva = 'nuevo');
-end $$;
+end;
 
 -- 8c · R6 sobre todo lo creado aquí: ninguna oportunidad ACTIVA sin tarea abierta.
-do $$
+  <<bloque_25>>
 declare v_sin text;
 begin
   select string_agg(p.nombre_completo, ', ') into v_sin
@@ -743,13 +777,13 @@ begin
      and not exists (select 1 from tareas t where t.oportunidad_id = o.id and t.completada_el is null);
   perform pg_temp.anotar('R6', 'Ninguna oportunidad activa de estas pruebas se queda sin tarea abierta',
     'ninguna', coalesce(v_sin, 'ninguna'), v_sin is null);
-end $$;
+end;
 
 -- 8d · `lectura` ve la oportunidad (oport_leer) pero NO su perfil: el capital
 -- declarado puede ser dato sensible. No hay un perfil `lectura` real, así que
 -- a administración se le cambia el rol un momento (el rollback lo deshace, y
 -- aquí mismo se devuelve por si alguien añade pruebas debajo).
-do $$
+  <<bloque_26>>
 declare v_adm uuid := pg_temp.f('administracion'); v_eva uuid := pg_temp.f('op_eva');
         v_op integer; v_perf integer;
 begin
@@ -767,7 +801,7 @@ exception when others then
   execute 'reset role';
   perform pg_temp.como(null);
   perform pg_temp.anotar('RLS', 'lectura ve la oportunidad pero NO su perfil comercial', '1 / 0', sqlerrm, false);
-end $$;
+end;
 
 -- ---------------------------------------------------------------------
 -- 9 · HUMO: cada RPC nueva que la interfaz llama, al menos una vez
@@ -783,7 +817,7 @@ end $$;
 -- 9a · Ciclo de una visita: datos del aviso → aviso registrado → confirmar →
 -- realizada con resultado. El lugar sale NULO porque sus parámetros están en
 -- 🔴 (SPEC §2: al cliente solo llega lo 'verde'), y R6 deja una tarea abierta.
-do $$
+  <<bloque_27>>
 declare v jsonb; v_d jsonb; v_op uuid; v_vis uuid; v_paso text := 'fn_registrar_prospecto';
         v_estado text; v_aviso timestamptz; v_notif integer; v_abiertas integer; v_conf integer;
 begin
@@ -820,12 +854,12 @@ exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('HUMO', 'Visita: datos del aviso → aviso → confirmar → realizada', 'sin error',
     v_paso || ': ' || sqlerrm, false);
-end $$;
+end;
 
 -- 9b · Situación y temperatura: enfriar (deja tarea de reactivación) →
 -- reactivar → fijar temperatura a mano y quitarla → descartar (0 tareas).
 -- Cada cambio deja su evento (R9).
-do $$
+  <<bloque_28>>
 declare v jsonb; v_op uuid; v_paso text := 'fn_registrar_prospecto';
         v_s1 text; v_s2 text; v_s3 text; v_react boolean; v_t1 text; v_m1 boolean; v_m2 boolean;
         v_cod text; v_abiertas integer; v_ev integer;
@@ -860,13 +894,13 @@ exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('HUMO', 'Situación: enfriar → reactivar → temperatura a mano → descartar', 'sin error',
     v_paso || ': ' || sqlerrm, false);
-end $$;
+end;
 
 -- 9c · Equipo, campaña y asignación: fn_equipo trae a los tres roles
 -- operativos (nunca a lectura); fn_campana_asegurar no duplica por
 -- mayúsculas/espacios y no inventa inversión; Dirección asigna (y las tareas
 -- abiertas se van con el lead); un comercial no puede quitarle el lead a otro.
-do $$
+  <<bloque_29>>
 declare v jsonb; v_op uuid; v_paso text := 'fn_equipo'; v_eq integer; v_otros integer;
         v_c1 uuid; v_c2 uuid; v_inv numeric; v_asig integer; v_omit integer; v_resp uuid; v_mal integer;
 begin
@@ -903,12 +937,12 @@ exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('HUMO', 'fn_equipo, fn_campana_asegurar y fn_asignar_oportunidades', 'sin error',
     v_paso || ': ' || sqlerrm, false);
-end $$;
+end;
 
 -- 9d · Documento con RLS de verdad (rol authenticated, como el comercial):
 -- sube la fila y el objeto del bucket, lo lee; archivar sin motivo falla con
 -- SU mensaje; con motivo archiva y el objeto deja de poder leerse.
-do $$
+  <<bloque_30>>
 declare v_doc uuid; v_ruta text := 'prueba-13/' || gen_random_uuid()::text || '.pdf';
         v_paso text := 'insert documentos (RLS)'; v_lee1 integer; v_lee2 integer;
         v_fallo boolean := false; v_msg text := 'se archivó sin motivo'; v_arch timestamptz;
@@ -943,14 +977,12 @@ exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('HUMO', 'Documento: subir (RLS + storage), archivar exige motivo, archivado no se lee', 'sin error',
     v_paso || ': ' || sqlerrm, false);
-end $$;
-
--- @@FIN_CUERPO
+end;
 
 
--- =====================================================================
--- EL CUADRO FINAL (una sola consulta: el SQL Editor enseña solo la última)
--- =====================================================================
+    -- El cuadro, ANTES de deshacer: lo que se guarda en una variable sobrevive.
+    select jsonb_agg(to_jsonb(c) order by c.n) into v_cuadro
+      from (
 with resumen as (
   select 9999 as n,
          'RESUMEN' as regla,
@@ -969,11 +1001,43 @@ from (
   union all
   select n, regla, veredicto, prueba, esperado, obtenido from resumen
 ) todo
-order by n;
+order by n
+      ) c;
+    -- Deshacer TODO lo que hizo la batería (personas, oportunidades, tareas,
+    -- visitas, perfiles, documentos, tablas y funciones temporales): un error
+    -- atrapado justo abajo.
+    raise exception using errcode = 'P0999', message = 'deshacer la batería';
+  exception
+    when sqlstate 'P0999' then
+      null;
+    when others then
+      -- La batería se cayó a mitad de camino (p. ej. una regresión en la migración que prueba).
+      -- Lo que hizo ya se deshizo con el sub-bloque; el error no se esconde: sale como fila.
+      get stacked diagnostics v_ctx = pg_exception_context;
+      v_caida := sqlerrm;
+  end;
 
+  -- La función no se queda en la base: se borra a sí misma.
+  execute 'drop function if exists public.probar_reglas_13()';
 
--- =====================================================================
--- ⚠️ NO BORRES ESTA LÍNEA: deshace personas, oportunidades, tareas,
--- visitas, perfiles, documentos y el cambio de rol de la prueba 8d.
--- =====================================================================
-rollback;
+  if v_caida is not null then
+    return query
+      select 1, 'CAÍDA'::text, '🔴 FALLA'::text, 'La batería llegó hasta el final sin caerse'::text, 'sin error'::text,
+             left(v_caida || ' · ' || coalesce(replace(v_ctx, E'\n', ' | '), ''), 1200)::text
+      union all
+      select 9999, 'RESUMEN'::text, '0 pasan · 1 fallan · 0 omitidas'::text, '1 pruebas'::text,
+             'La batería se cayó: la fila 🔴 de arriba dice dónde. Nada de lo que hizo quedó en la base'::text, ''::text;
+    return;
+  end if;
+
+  return query
+    select x.n, x.regla, x.veredicto, x.prueba, x.esperado, x.obtenido
+      from jsonb_to_recordset(v_cuadro)
+        as x(n integer, regla text, veredicto text, prueba text, esperado text, obtenido text)
+     order by x.n;
+end $bateria$;
+
+-- Nadie la puede llamar por la API mientras exista (solo quien la creó, en el editor).
+revoke all on function public.probar_reglas_13() from public, anon, authenticated;
+
+select * from public.probar_reglas_13();

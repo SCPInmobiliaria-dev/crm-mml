@@ -38,11 +38,11 @@
 -- ---------------------------------------------------------------------
 -- ESTE ARCHIVO NO DEJA RASTRO
 -- ---------------------------------------------------------------------
--- Todo va dentro de un `begin … rollback`. Al terminar, la base queda
--- exactamente como estaba: ni una persona de prueba, ni una unidad, ni un
--- parámetro tocado. Por eso puede correrse incluso sobre un proyecto con
--- datos reales — pero ⚠️ NO borres el `rollback` del final, y si tienes
--- que ejecutarlo por trozos, lee antes pruebas\COMO-PROBAR.md.
+-- Todo se deshace al terminar (ver «CÓMO SE CORRE» al final de esta
+-- cabecera): la base queda exactamente como estaba, ni una persona de
+-- prueba, ni una unidad, ni un parámetro tocado. Por eso puede correrse
+-- incluso sobre un proyecto con datos reales. Ya no hay `begin … rollback`
+-- que respetar ni trozos que cuidar: es una sola función, se pega entera.
 --
 -- ---------------------------------------------------------------------
 -- AQUÍ NO HAY NI UNA CIFRA DEL NEGOCIO
@@ -66,8 +66,53 @@
 -- 04-seed-parametros, 06, 07, 08 y 09. Sin 04 falla ya la preparación:
 -- `separaciones.plazo_parametro` referencia una fila de `parametros`.
 -- =====================================================================
+--
+-- ---------------------------------------------------------------------
+-- CÓMO SE CORRE (versión de una sola sentencia, 07/10/2026)
+-- ---------------------------------------------------------------------
+-- El SQL Editor de Supabase no siempre mantiene un `begin … rollback` entre
+-- sentencias: la primera corrida de la batería 17 falló con «relation
+-- "resultado" does not exist» porque la tabla temporal ya se había borrado.
+-- Por eso ahora TODO va dentro de una función: corre en una sola sentencia,
+-- lo deshace todo al final (un error atrapado a propósito: nada de lo que
+-- crea queda en la base) y devuelve el cuadro como filas. La función se
+-- borra sola al terminar. Se pega entero y se pulsa Run; da igual el editor.
+-- Si falta algo del esquema que se prueba, no corre nada: devuelve UNA sola
+-- fila 🔴 PRE que dice qué falta.
+-- =====================================================================
 
-begin;
+create or replace function public.probar_reglas_base()
+returns table (n integer, regla text, veredicto text, prueba text, esperado text, obtenido text)
+language plpgsql set search_path = public as $bateria$
+#variable_conflict use_column
+declare
+  v_cuadro jsonb;
+  v_caida  text;
+  v_ctx    text;
+  v_falta  text;
+begin
+  -- Sin lo que se prueba, no se corre nada: se dice qué falta.
+  v_falta := (
+    select string_agg(f.o, ', ' order by f.o)
+          from (select x as o
+                  from unnest(array[
+                        'personas', 'unidades', 'oportunidades', 'separaciones', 'contratos', 'cuotas', 'pagos', 'tareas', 'estado_historial', 'parametros', 'perfiles', 'v_sin_siguiente_paso', 'v_cobranza']) x
+                 where to_regclass('public.' || x) is null
+                union all
+                select 'puede_emitir_constancia()'
+                 where to_regprocedure('public.puede_emitir_constancia(uuid)') is null) f);
+  if v_falta is not null then
+    return query
+      select 1, 'PRE'::text, '🔴 FALLA'::text, 'El esquema que se prueba está aplicado'::text, 'sí'::text,
+             ('NO: falta aplicar el esquema base de sql/ (01 a 14, y como mínimo 01, 02, 03, 04, 06, 07, 08 y 09) en el SQL Editor.' || ' Faltan: ' || v_falta || '.' || ' Aplícalo primero y vuelve a correr esta batería.')::text
+      union all
+      select 9999, 'RESUMEN'::text, '0 pasan · 1 fallan · 0 conocidas · 0 omitidas · 0 a revisar'::text, '1 pruebas'::text,
+             'Mira las filas 🔴 de arriba: son las únicas que exigen algo'::text, ''::text;
+    execute 'drop function if exists public.probar_reglas_base()';
+    return;
+  end if;
+  begin
+-- @@INICIO_CUERPO
 
 -- ---------------------------------------------------------------------
 -- 0 · EL CUADERNO DE RESULTADOS
@@ -142,7 +187,7 @@ select 'cualquiera', id from perfiles limit 1;
 -- =====================================================================
 
 -- R9a · el INSERT de una oportunidad escribe su historial solo
-do $$
+<<bloque_1>>
 declare v_op uuid; v_filas int;
 begin
   insert into oportunidades (persona_id, unidad_asignada_id)
@@ -163,7 +208,7 @@ begin
    '1 fila con de_estado NULL y a_estado 01_prospecto_captado',
    v_filas || ' fila(s)',
    case when v_filas = 1 then '✅ PASA' else '🔴 FALLA' end);
-end $$;
+end;
 
 
 -- =====================================================================
@@ -173,7 +218,7 @@ end $$;
 -- =====================================================================
 
 -- R1a · dos oportunidades activas sobre la misma unidad
-do $$
+<<bloque_2>>
 declare v_fallo boolean := false; v_msg text := 'se insertó la segunda asignación';
 begin
   begin
@@ -190,11 +235,11 @@ begin
    '❌ ERROR del índice único unidad_una_sola_asignacion_activa',
    v_msg,
    pg_temp.veredicto_error(v_fallo, v_msg, 'unidad_una_sola_asignacion_activa'));
-end $$;
+end;
 
 -- R1b · dos separaciones vivas sobre la misma unidad
 -- (el índice existe desde 01-schema.sql; 05-pruebas-reglas.sql no lo probaba)
-do $$
+<<bloque_3>>
 declare v_fallo boolean := false; v_msg text := 'se insertó la segunda separación';
 begin
   -- La primera es legítima. Sin fecha de depósito, para no tropezar
@@ -221,10 +266,10 @@ begin
    '❌ ERROR del índice único unidad_una_separacion_viva',
    v_msg,
    pg_temp.veredicto_error(v_fallo, v_msg, 'unidad_una_separacion_viva'));
-end $$;
+end;
 
 -- R1c · dos contratos vivos sobre la misma unidad
-do $$
+<<bloque_4>>
 declare v_fallo boolean := false; v_msg text := 'se insertó el segundo contrato';
 begin
   insert into contratos (persona_id, unidad_id, precio_total, precio_moneda)
@@ -245,7 +290,7 @@ begin
    '❌ ERROR del índice único unidad_un_contrato_vivo',
    v_msg,
    pg_temp.veredicto_error(v_fallo, v_msg, 'unidad_un_contrato_vivo'));
-end $$;
+end;
 
 
 -- =====================================================================
@@ -253,7 +298,7 @@ end $$;
 -- =====================================================================
 
 -- R5a · a 06_calificado con las cuatro vacías
-do $$
+<<bloque_5>>
 declare v_fallo boolean := false; v_msg text := 'llegó a 06_calificado sin cualificar';
 begin
   begin
@@ -269,11 +314,11 @@ begin
    '❌ ERROR de la restricción calificado_requiere_las_4_respuestas',
    v_msg,
    pg_temp.veredicto_error(v_fallo, v_msg, 'calificado_requiere_las_4_respuestas'));
-end $$;
+end;
 
 -- R5b · con TRES de las cuatro, tampoco. Es la prueba que distingue
 -- «exige las cuatro» de «exige alguna».
-do $$
+<<bloque_6>>
 declare v_fallo boolean := false; v_msg text := 'pasó con solo 3 respuestas';
 begin
   begin
@@ -294,11 +339,11 @@ begin
    '❌ ERROR de la restricción calificado_requiere_las_4_respuestas',
    v_msg,
    pg_temp.veredicto_error(v_fallo, v_msg, 'calificado_requiere_las_4_respuestas'));
-end $$;
+end;
 
 -- R5c · con las cuatro, sí pasa. Una regla que no deja pasar nunca nada
 -- no es una regla, es un muro.
-do $$
+<<bloque_7>>
 declare v_estado text; v_msg text;
 begin
   begin
@@ -323,11 +368,11 @@ begin
    '✅ se guarda, estado = 06_calificado',
    v_msg,
    case when v_estado = '06_calificado' then '✅ PASA' else '🔴 FALLA' end);
-end $$;
+end;
 
 -- R5d · la exigencia vale del 06 EN ADELANTE, no solo en el 06.
 -- La restricción dice `estado < '06_calificado' or (las 4 no son nulas)`.
-do $$
+<<bloque_8>>
 declare v_fallo boolean := false; v_msg text := 'llegó a 07_contrato con una respuesta borrada';
 begin
   begin
@@ -343,7 +388,7 @@ begin
    '❌ ERROR: la exigencia vale del 06 en adelante, no solo en el 06',
    v_msg,
    pg_temp.veredicto_error(v_fallo, v_msg, 'calificado_requiere_las_4_respuestas'));
-end $$;
+end;
 
 
 -- =====================================================================
@@ -351,7 +396,7 @@ end $$;
 -- =====================================================================
 
 -- R9b · el UPDATE de estado escribió su fila, con de_estado y a_estado
-do $$
+<<bloque_9>>
 declare v_filas int;
 begin
   select count(*) into v_filas from estado_historial
@@ -365,12 +410,12 @@ begin
    '1 fila 01_prospecto_captado → 06_calificado',
    v_filas || ' fila(s)',
    case when v_filas = 1 then '✅ PASA' else '🔴 FALLA' end);
-end $$;
+end;
 
 -- R9c · un UPDATE que NO toca el estado no debe ensuciar el historial.
 -- Sin esta prueba, un disparador que escribiera en CADA update también
 -- pasaría R9a y R9b, y el historial dejaría de servir como evidencia.
-do $$
+<<bloque_10>>
 declare v_antes int; v_despues int;
 begin
   select count(*) into v_antes from estado_historial
@@ -388,7 +433,7 @@ begin
    'el conteo no cambia (' || v_antes || ')',
    'antes ' || v_antes || ', después ' || v_despues,
    case when v_antes = v_despues then '✅ PASA' else '🔴 FALLA' end);
-end $$;
+end;
 
 
 -- =====================================================================
@@ -399,7 +444,7 @@ end $$;
 -- Hoy `plazo_devolucion_separacion_dias` está en 🔴 y sin valor_entero, así
 -- que esta prueba corre tal cual. Si alguien ya lo cargó, sale OMITIDA: no
 -- se vacía un parámetro de la fuente de verdad para forzar un error.
-do $$
+<<bloque_11>>
 declare v_dias int; v_fallo boolean := false; v_msg text := 'aceptó el depósito sin plazo cargado';
 begin
   select valor_entero into v_dias from parametros
@@ -431,13 +476,13 @@ begin
      v_msg,
      pg_temp.veredicto_error(v_fallo, v_msg, 'plazo_devolucion_separacion_dias'));
   end if;
-end $$;
+end;
 
 -- R4b · MOVER fecha_deposito_efectivo NO ALTERA fecha_limite_precio.
 -- ⚠️ Necesita UN plazo para poder hacer la resta. Usa uno de juguete (3) y
 -- devuelve el parámetro a como estaba pase lo que pase — ni aunque alguien
 -- se saltara el `rollback` del final quedaría tocado.
-do $$
+<<bloque_12>>
 declare
   v_plazo_falso constant int := 3;   -- ficha de juguete. NO es el plazo del negocio.
   v_dias_antes  int;
@@ -496,10 +541,10 @@ exception when others then
    'Mover fecha_deposito_efectivo NO altera fecha_limite_precio',
    'los dos relojes se mueven por separado',
    sqlerrm, '🔴 FALLA');
-end $$;
+end;
 
 -- R4c · la simétrica: mover fecha_limite_precio NO altera el reloj 1.
-do $$
+<<bloque_13>>
 declare v_sep uuid; v_devol_1 date; v_devol_2 date; v_precio_2 date;
 begin
   select id into v_sep from fixture where clave = 'sep_u2';
@@ -511,7 +556,7 @@ begin
      'el reloj 1 no se mueve',
      'no se pudo crear la separación de prueba en R4b',
      '🟡 OMITIDA');
-    return;
+    exit bloque_13;
   end if;
 
   select fecha_limite_devolucion into v_devol_1 from separaciones where id = v_sep;
@@ -527,7 +572,7 @@ begin
    'devolución: ' || coalesce(v_devol_1::text, 'null') || ' → ' || coalesce(v_devol_2::text, 'null')
      || ' · precio ahora ' || v_precio_2,
    case when v_devol_1 is not distinct from v_devol_2 then '✅ PASA' else '🔴 FALLA' end);
-end $$;
+end;
 
 
 -- =====================================================================
@@ -535,7 +580,7 @@ end $$;
 -- =====================================================================
 
 -- R3a · separación sin verificar → false
-do $$
+<<bloque_14>>
 declare v_puede boolean; v_sep uuid;
 begin
   select id into v_sep from fixture where clave = 'sep_u2';
@@ -544,7 +589,7 @@ begin
     insert into resultado (regla, prueba, esperado, obtenido, veredicto) values
     ('R3a', 'puede_emitir_constancia() sobre una separación sin verificar',
      'false', 'no hay separación de prueba (ver R4b)', '🟡 OMITIDA');
-    return;
+    exit bloque_14;
   end if;
 
   select puede_emitir_constancia(v_sep) into v_puede;
@@ -555,7 +600,7 @@ begin
    'false',
    coalesce(v_puede::text, 'null'),
    case when v_puede is false then '✅ PASA' else '🔴 FALLA' end);
-end $$;
+end;
 
 
 -- =====================================================================
@@ -569,7 +614,7 @@ end $$;
 -- =====================================================================
 
 -- R2a · sin sesión (nadie) → excepción
-do $$
+<<bloque_15>>
 declare v_fallo boolean := false; v_msg text := 'verificó una separación sin sesión';
 begin
   begin
@@ -585,10 +630,10 @@ begin
    '❌ ERROR citando el Acta 03-O02',
    v_msg,
    pg_temp.veredicto_error(v_fallo, v_msg, 'Acta 03-O02'));
-end $$;
+end;
 
 -- R2b · suplantando a un usuario de rol `comercial` → excepción
-do $$
+<<bloque_16>>
 declare v_uid uuid; v_fallo boolean := false; v_msg text := 'un comercial verificó la separación';
 begin
   select id into v_uid from fixture where clave = 'comercial';
@@ -600,7 +645,7 @@ begin
      '❌ ERROR citando el Acta 03-O02',
      'no hay ningún perfil activo con rol comercial en este proyecto',
      '🟡 OMITIDA');
-    return;
+    exit bloque_16;
   end if;
 
   perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
@@ -631,11 +676,11 @@ exception when others then
   insert into resultado (regla, prueba, esperado, obtenido, veredicto) values
   ('R2b', 'Un usuario de rol comercial marca una separación como verificada',
    '❌ ERROR citando el Acta 03-O02', sqlerrm, '🔴 FALLA');
-end $$;
+end;
 
 -- R2c · suplantando a DIRECCIÓN → sí verifica. Y el disparador escribe
 -- `verificada_por` él mismo, sin fiarse de lo que mande el cliente.
-do $$
+<<bloque_17>>
 declare v_uid uuid; v_por uuid; v_estado text; v_msg text;
 begin
   select id into v_uid from fixture where clave = 'direccion';
@@ -647,7 +692,7 @@ begin
      '✅ se guarda y verificada_por queda con su id',
      'no hay ningún perfil activo con rol direccion en este proyecto',
      '🟡 OMITIDA');
-    return;
+    exit bloque_17;
   end if;
 
   perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
@@ -679,11 +724,11 @@ exception when others then
   insert into resultado (regla, prueba, esperado, obtenido, veredicto) values
   ('R2c', 'Un usuario de rol direccion marca la separación como verificada',
    '✅ estado = verificada y verificada_por = su propio id', sqlerrm, '🔴 FALLA');
-end $$;
+end;
 
 -- R3b · verificada pero SIN documento del cliente → sigue siendo false.
 -- La función exige las TRES cosas; esta prueba impide que se relaje a una.
-do $$
+<<bloque_18>>
 declare v_puede boolean; v_verificada timestamptz; v_sep uuid;
 begin
   select id into v_sep from fixture where clave = 'sep_u2';
@@ -696,7 +741,7 @@ begin
      'false',
      'la separación no llegó a verificarse (ver R2c)',
      '🟡 OMITIDA');
-    return;
+    exit bloque_18;
   end if;
 
   select puede_emitir_constancia(v_sep) into v_puede;
@@ -707,10 +752,10 @@ begin
    'false: la constancia exige las tres condiciones, no solo la verificación',
    coalesce(v_puede::text, 'null'),
    case when v_puede is false then '✅ PASA' else '🔴 FALLA' end);
-end $$;
+end;
 
 -- R3c · verificada Y con documento → ahora sí, true.
-do $$
+<<bloque_19>>
 declare v_puede boolean; v_verificada timestamptz; v_sep uuid;
 begin
   select id into v_sep from fixture where clave = 'sep_u2';
@@ -723,7 +768,7 @@ begin
      'true',
      'la separación no llegó a verificarse (ver R2c)',
      '🟡 OMITIDA');
-    return;
+    exit bloque_19;
   end if;
 
   update separaciones set doc_cliente_registrado = true where id = v_sep;
@@ -735,7 +780,7 @@ begin
    'true: es el único caso en que se puede emitir',
    coalesce(v_puede::text, 'null'),
    case when v_puede is true then '✅ PASA' else '🔴 FALLA' end);
-end $$;
+end;
 
 
 -- =====================================================================
@@ -743,7 +788,7 @@ end $$;
 -- =====================================================================
 
 -- R6a · sin tarea → sale en la lista de fuga
-do $$
+<<bloque_20>>
 declare v_sale boolean;
 begin
   select exists (select 1 from v_sin_siguiente_paso
@@ -756,11 +801,11 @@ begin
    'la oportunidad de prueba aparece en la vista',
    case when v_sale then 'aparece' else 'NO aparece' end,
    case when v_sale then '✅ PASA' else '🔴 FALLA' end);
-end $$;
+end;
 
 -- R6b · al abrirle una tarea, desaparece. Una vista que enseñara siempre
 -- lo mismo pasaría R6a y no serviría para nada.
-do $$
+<<bloque_21>>
 declare v_responsable uuid; v_sale boolean;
 begin
   select id into v_responsable from fixture where clave = 'cualquiera';
@@ -772,7 +817,7 @@ begin
      'deja de aparecer',
      'no hay ningún perfil en la base y tareas.responsable_id es obligatorio',
      '🟡 OMITIDA');
-    return;
+    exit bloque_21;
   end if;
 
   insert into tareas (titulo, oportunidad_id, responsable_id, vence_el)
@@ -790,7 +835,7 @@ begin
    'deja de aparecer en la vista',
    case when v_sale then 'sigue apareciendo' else 'ya no aparece' end,
    case when v_sale then '🔴 FALLA' else '✅ PASA' end);
-end $$;
+end;
 
 
 -- =====================================================================
@@ -801,7 +846,7 @@ end $$;
 -- columna de moneda. Se excluyen tres cosas que son numéricas y no son
 -- dinero; si mañana aparece una cuarta, esta prueba la delata y hay que
 -- decidir a mano si es dinero o no.
-do $$
+<<bloque_22>>
 declare v_malas text;
 begin
   select string_agg(distinct c.table_name || '.' || c.column_name, ', ')
@@ -826,7 +871,7 @@ begin
    'ninguna vista incumple',
    coalesce(v_malas, 'ninguna'),
    case when v_malas is null then '✅ PASA' else '🔴 FALLA' end);
-end $$;
+end;
 
 -- R7b · 🔴 EL AGUJERO CONOCIDO, PUESTO EN NÚMEROS.
 --
@@ -844,7 +889,7 @@ end $$;
 -- y esta prueba lo demuestra. Arreglarlo es una migración de la vista:
 -- decisión pendiente, no un descuido. Cuando se haga, esta prueba pasa
 -- sola a ✅ y hay que borrar este párrafo.
-do $$
+<<bloque_23>>
 declare
   v_contrato uuid; v_cuota uuid;
   v_pagado numeric; v_saldo numeric;
@@ -873,7 +918,7 @@ begin
    'pagado = ' || coalesce(v_pagado::text, 'null')
      || ', saldo = ' || coalesce(v_saldo::text, 'null'),
    case when v_saldo = v_correcto then '✅ PASA' else '🔴 FALLA CONOCIDA' end);
-end $$;
+end;
 
 
 -- =====================================================================
@@ -881,7 +926,7 @@ end $$;
 -- 05-pruebas-reglas.sql solo probaba `personas`: un disparador que faltara
 -- en las otras cuatro habría pasado desapercibido.
 -- =====================================================================
-do $$
+<<bloque_24>>
 declare v_tabla text; v_id uuid; v_fallo boolean; v_msg text;
 begin
   foreach v_tabla in array array['personas','oportunidades','separaciones','contratos','pagos']
@@ -910,7 +955,7 @@ begin
      v_msg,
      pg_temp.veredicto_error(v_fallo, v_msg, 'Nada se borra'));
   end loop;
-end $$;
+end;
 
 
 -- =====================================================================
@@ -919,7 +964,7 @@ end $$;
 -- pública. Esta prueba no cuenta: NOMBRA a las que faltan, porque un «2»
 -- no dice qué hay que arreglar.
 -- =====================================================================
-do $$
+<<bloque_25>>
 declare v_sin text; v_total int;
 begin
   select count(*) into v_total from pg_tables where schemaname = 'public';
@@ -932,11 +977,11 @@ begin
    '0 tablas sin RLS (de ' || v_total || ')',
    coalesce('sin RLS: ' || v_sin, 'ninguna sin RLS'),
    case when v_sin is null then '✅ PASA' else '🔴 FALLA' end);
-end $$;
+end;
 
 -- RLS-b · `force row level security`, para que la regla valga también para
 -- el dueño de la tabla. 02-rls.sql lo aplica a las 15 tablas del CRM.
-do $$
+<<bloque_26>>
 declare v_sin text;
 begin
   select string_agg(c.relname, ', ' order by c.relname) into v_sin
@@ -950,11 +995,11 @@ begin
    'ninguna tabla con RLS sin FORCE',
    coalesce('sin FORCE: ' || v_sin, 'ninguna'),
    case when v_sin is null then '✅ PASA' else '🟡 REVISAR' end);
-end $$;
+end;
 
 -- RLS-c · informativo: una tabla con RLS y CERO políticas no la lee nadie.
 -- No es un agujero —es lo contrario—, pero casi siempre es un descuido.
-do $$
+<<bloque_27>>
 declare v_mudas text;
 begin
   select string_agg(c.relname, ', ' order by c.relname) into v_mudas
@@ -969,16 +1014,13 @@ begin
    'ninguna, o solo las que se quieren cerradas a propósito',
    coalesce(v_mudas, 'ninguna'),
    case when v_mudas is null then '✅ PASA' else '🟡 REVISAR' end);
-end $$;
+end;
 
 
--- =====================================================================
--- EL CUADRO FINAL
---
--- Un solo resultado, con el resumen como última fila: el SQL Editor de
--- Supabase enseña únicamente el último conjunto de resultados, así que
--- tres SELECT seguidos harían desaparecer los dos primeros.
--- =====================================================================
+
+    -- El cuadro, ANTES de deshacer: lo que se guarda en una variable sobrevive.
+    select jsonb_agg(to_jsonb(c) order by c.n) into v_cuadro
+      from (
 with resumen as (
   select 9999 as n,
          'RESUMEN' as regla,
@@ -999,13 +1041,42 @@ from (
   union all
   select n, regla, veredicto, prueba, esperado, obtenido from resumen
 ) todo
-order by n;
+order by n
+      ) c;
+    -- Deshacer TODO lo que hizo la batería (unidades, personas, separaciones,
+    -- papeles, tablas y funciones temporales): un error atrapado justo abajo.
+    raise exception using errcode = 'P0999', message = 'deshacer la batería';
+  exception
+    when sqlstate 'P0999' then
+      null;
+    when others then
+      -- La batería se cayó a mitad de camino (p. ej. una regresión en la migración que prueba).
+      -- Lo que hizo ya se deshizo con el sub-bloque; el error no se esconde: sale como fila.
+      get stacked diagnostics v_ctx = pg_exception_context;
+      v_caida := sqlerrm;
+  end;
 
+  -- La función no se queda en la base: se borra a sí misma.
+  execute 'drop function if exists public.probar_reglas_base()';
 
--- =====================================================================
--- ⚠️ NO BORRES ESTA LÍNEA
--- Deshace TODO lo anterior: personas, unidades, oportunidades,
--- separaciones, contratos, cuotas, pagos y tareas de prueba, y el plazo
--- de juguete. Sin esto, el archivo ensucia la base en vez de comprobarla.
--- =====================================================================
-rollback;
+  if v_caida is not null then
+    return query
+      select 1, 'CAÍDA'::text, '🔴 FALLA'::text, 'La batería llegó hasta el final sin caerse'::text, 'sin error'::text,
+             left(v_caida || ' · ' || coalesce(replace(v_ctx, E'\n', ' | '), ''), 1200)::text
+      union all
+      select 9999, 'RESUMEN'::text, '0 pasan · 1 fallan · 0 conocidas · 0 omitidas · 0 a revisar'::text, '1 pruebas'::text,
+             'La batería se cayó: la fila 🔴 de arriba dice dónde. Nada de lo que hizo quedó en la base'::text, ''::text;
+    return;
+  end if;
+
+  return query
+    select x.n, x.regla, x.veredicto, x.prueba, x.esperado, x.obtenido
+      from jsonb_to_recordset(v_cuadro)
+        as x(n integer, regla text, veredicto text, prueba text, esperado text, obtenido text)
+     order by x.n;
+end $bateria$;
+
+-- Nadie la puede llamar por la API mientras exista (solo quien la creó, en el editor).
+revoke all on function public.probar_reglas_base() from public, anon, authenticated;
+
+select * from public.probar_reglas_base();

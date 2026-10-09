@@ -30,12 +30,14 @@
 -- ---------------------------------------------------------------------
 -- ESTE ARCHIVO NO DEJA RASTRO, Y NO AVISA A NADIE
 -- ---------------------------------------------------------------------
--- Todo va dentro de `begin … rollback`: las unidades PRUEBA16-*, la persona,
--- las oportunidades, la separación, el corte de disponibilidad cambiado un
--- momento (§3c) y el mensaje de Realtime que encolan los disparadores se
--- deshacen al final. Un mensaje de Realtime solo sale al CONFIRMARSE la
--- transacción: con el rollback no llega a ningún navegador.
--- ⚠️ NO borres el `rollback` del final.
+-- Todo va dentro de UNA función que se deshace sola: las unidades PRUEBA16-*, la
+-- persona, las oportunidades, la separación, el corte de disponibilidad
+-- cambiado un momento (§3c) y el mensaje de Realtime que encolan los
+-- disparadores se deshacen al final (un error atrapado a propósito, ver
+-- «CÓMO SE CORRE» más abajo). Un mensaje de Realtime solo sale al CONFIRMARSE
+-- la transacción: al deshacerse no llega a ningún navegador.
+-- ⚠️ NO quites el `raise exception … 'P0999'` ni el `exception when sqlstate
+-- 'P0999'` que lo atrapa: es lo único que deshace los datos de prueba.
 --
 -- ---------------------------------------------------------------------
 -- AQUÍ NO HAY NI UNA CIFRA DEL NEGOCIO
@@ -65,9 +67,40 @@
 -- SUPLANTACIÓN: como reglas-13 — claims del JWT con set_config; para RLS,
 -- `set local role authenticated`; para la web, `set local role anon`.
 -- =====================================================================
+--
+-- ---------------------------------------------------------------------
+-- CÓMO SE CORRE (versión de una sola sentencia, 07/10/2026)
+-- ---------------------------------------------------------------------
+-- El SQL Editor de Supabase no siempre mantiene un `begin … rollback` entre
+-- sentencias: la primera corrida de la batería 17 falló con «relation
+-- "resultado" does not exist» porque la tabla temporal ya se había borrado.
+-- Por eso ahora TODO va dentro de una función: corre en una sola sentencia,
+-- lo deshace todo al final (un error atrapado a propósito: nada de lo que
+-- crea queda en la base) y devuelve el cuadro como filas. La función se
+-- borra sola al terminar. Se pega entero y se pulsa Run; da igual el editor.
+-- =====================================================================
 
-begin;
-
+create or replace function public.probar_reglas_16()
+returns table (n integer, regla text, veredicto text, prueba text, esperado text, obtenido text)
+language plpgsql set search_path = public as $bateria$
+#variable_conflict use_column
+declare
+  v_cuadro jsonb;
+  v_caida  text;
+  v_ctx    text;
+begin
+  -- Sin la migración que se prueba, no se corre nada: se dice qué falta.
+  if not (to_regprocedure('public.fn_inventario_publico()') is not null) then
+    return query
+      select 1, 'PRE'::text, '🔴 FALLA'::text, 'La migración está aplicada'::text, 'sí'::text,
+             'NO: falta aplicar sql/16-inventario-publico.sql en el SQL Editor. Aplícala primero y vuelve a correr esta batería.'::text
+      union all
+      select 9999, 'RESUMEN'::text, '0 pasan · 1 fallan · 0 omitidas · 0 revisar'::text, '1 pruebas'::text,
+             'Mira las filas 🔴 de arriba: son las únicas que exigen algo'::text, ''::text;
+    execute 'drop function if exists public.probar_reglas_16()';
+    return;
+  end if;
+  begin
 -- @@INICIO_CUERPO
 
 -- ---------------------------------------------------------------------
@@ -160,7 +193,7 @@ begin
   return null;
 end $$;
 
-do $$
+<<bloque_1>>
 declare v_n integer; v_fn boolean; v_16 boolean;
 begin
   insert into fixture select 'comercial', id from perfiles
@@ -178,11 +211,11 @@ begin
    concat_ws(' · ', 'función ' || case when v_fn then 'sí' else 'NO' end, v_n || ' de 2 perfiles',
              '16 en migraciones_aplicadas: ' || case when v_16 then 'sí' else 'no' end),
    case when not v_fn then '🔴 FALLA' when v_n = 2 then '✅ PASA' else '🟡 OMITIDA' end);
-end $$;
+end;
 
 -- Cuántos mensajes del canal había ANTES de esta prueba (para REALTIME, §7).
 -- Si `realtime.messages` no existe o no se puede leer, queda vacío.
-do $$
+<<bloque_2>>
 declare v_n bigint;
 begin
   execute 'select count(*) from realtime.messages where topic = $1' into v_n using 'inventario-publico';
@@ -190,7 +223,7 @@ begin
 exception when others then
   perform set_config('prueba16.cola_inicial', '', true);
   perform set_config('prueba16.cola_error', left(sqlerrm, 120), true);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -200,7 +233,7 @@ end $$;
 -- 1a · La forma de la función: DEFINER (anon no lee las tablas), STABLE
 -- (PostgREST solo deja usar GET con STABLE/IMMUTABLE), search_path fijo,
 -- sin argumentos y devolviendo jsonb.
-do $$
+<<bloque_3>>
 declare v_def boolean; v_vol "char"; v_conf text; v_res text; v_args text;
 begin
   select p.prosecdef, p.provolatile, coalesce(array_to_string(p.proconfig, ' '), ''),
@@ -215,11 +248,11 @@ begin
                               nullif(v_conf, ''), '(' || v_args || ')', v_res), ''),
              'la función no existe: falta aplicar sql/16'),
     v_def and v_vol = 's' and strpos(v_conf, 'search_path=public') > 0 and v_args = '' and v_res = 'jsonb');
-end $$;
+end;
 
 -- 1b · Quién ejecuta qué: la función pública, anon y authenticated sí y
 -- PUBLIC no; la del aviso, nadie (un disparador no lo necesita).
-do $$
+<<bloque_4>>
 declare v_pub_anon boolean; v_pub_auth boolean; v_pub_public boolean;
         v_av_anon boolean; v_av_auth boolean; v_av_public boolean;
 begin
@@ -237,7 +270,7 @@ begin
 exception when others then
   perform pg_temp.anotar('SEG', 'EXECUTE: fn_inventario_publico para anon y authenticated (no PUBLIC); fn_inventario_publico_aviso para nadie',
     'pública: anon true · authenticated true · public false | aviso: false · false · false', sqlerrm, false);
-end $$;
+end;
 
 -- 1c · anon sigue sin leer NI ESCRIBIR ninguna tabla ni vista de public
 -- (02-rls §0, 11 §4): ni unidades, ni personas, ni separaciones, ni
@@ -245,7 +278,7 @@ end $$;
 -- parametros. Lo único que tiene es la función.
 -- (authenticated SÍ tiene SELECT sobre esas tablas a propósito —11 §2— y RLS
 -- decide las filas: comprobar aquí que no lo tuviera sería falso.)
-do $$
+<<bloque_5>>
 declare v_con text; v_nombradas text;
 begin
   select string_agg(c.relname, ', ' order by c.relname) into v_con
@@ -263,7 +296,7 @@ begin
     'ninguna',
     concat_ws(' · ', 'con privilegio: ' || coalesce(v_con, 'ninguna'), 'de las nombradas: ' || coalesce(v_nombradas, 'ninguna')),
     v_con is null and v_nombradas is null);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -279,7 +312,7 @@ end $$;
 --   SIN-VERIFICAR  disponible + amarillo, polígono de 2 pts → no_disponible, sin polígono
 --   CONTRATADA     contratada, polígono con un punto malo   → no_disponible, sin polígono
 --   ARCHIVADA      disponible + verde, archivada            → no aparece
-do $$
+<<bloque_6>>
 declare v_per uuid; v_op uuid; v_sep uuid;
 begin
   insert into personas (nombre_completo, telefono_e164)
@@ -332,7 +365,7 @@ begin
 exception when others then
   perform pg_temp.anotar('PREP', 'Preparación: 7 unidades PRUEBA16-*, 1 persona, 2 oportunidades, 1 separación viva',
     'sin error', sqlerrm, false);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -342,7 +375,7 @@ end $$;
 -- 3a · Como la web: rol anon (la clave publicable, sin sesión). Y como un
 -- usuario con sesión cualquiera. Los dos reciben exactamente lo mismo que el
 -- dueño de la función.
-do $$
+<<bloque_7>>
 declare v_dueno jsonb; v_anon jsonb; v_auth jsonb;
 begin
   v_dueno := fn_inventario_publico();
@@ -363,11 +396,11 @@ exception when others then
   execute 'reset role';
   perform pg_temp.anotar('SEG', 'anon (la web) y authenticated ejecutan fn_inventario_publico() y reciben lo mismo que su dueño',
     'idéntico para los tres', sqlerrm, false);
-end $$;
+end;
 
 -- 3b · Arriba, exactamente cinco claves; version 1; revision = md5 del
 -- texto de `unidades`; generado_el es una fecha de ahora.
-do $$
+<<bloque_8>>
 declare v jsonb := pg_temp.s('anon'); v_claves text; v_gen timestamptz; v_rev_ok boolean;
 begin
   v_claves := pg_temp.claves(v);
@@ -389,13 +422,13 @@ begin
       and jsonb_typeof(v -> 'unidades') = 'array'
       and v_rev_ok
       and v_gen between now() - interval '1 minute' and now() + interval '1 minute');
-end $$;
+end;
 
 -- 3c · disponibilidad: {semaforo, corte}. El texto del corte SOLO sale en
 -- verde. Se comprueba con el valor real y, además, forzando el parámetro a
 -- amarillo y a verde con un texto de juguete (se devuelve a su valor aquí
 -- mismo, y el rollback lo deshace igual: dos redes).
-do $$
+<<bloque_9>>
 declare v jsonb := pg_temp.s('anon') -> 'disponibilidad';
         v_sem text; v_val text; v_existe boolean; v_ok_real boolean;
         v_amarillo jsonb; v_verde jsonb; v_rep text;
@@ -435,11 +468,11 @@ begin
 exception when others then
   perform pg_temp.anotar('CONTRATO', 'disponibilidad = {semaforo, corte}; el texto del corte solo sale en verde (sql/14 §3)',
     'claves corte,semaforo · real coherente · amarillo: null · verde: PRUEBA16 corte', sqlerrm, false);
-end $$;
+end;
 
 -- 3d · Cada unidad: exactamente las 6 claves, con su tipo, un estado de los
 -- tres y, si hay polígono, 3..64 puntos [x, y] numéricos.
-do $$
+<<bloque_10>>
 declare v jsonb := pg_temp.s('anon') -> 'unidades'; v_malas integer; v_total integer; v_ej text;
 begin
   select count(*) filter (where pg_temp.forma_unidad(e) is not null),
@@ -455,13 +488,13 @@ begin
 exception when others then
   perform pg_temp.anotar('CONTRATO', 'Cada unidad: exactamente codigo, tipo, area_m2, zona_rubro, geometria y estado (disponible/separada/no_disponible)',
     '0 mal formadas', sqlerrm, false);
-end $$;
+end;
 
 -- 3e · Los totales cuadran con la base: todas las unidades vivas (si saliera
 -- de menos, el dueño de la función no atraviesa el FORCE RLS de `unidades`),
 -- ninguna archivada, en orden de codigo_unidad, y «disponible» = las filas de
 -- v_unidades_ofrecibles, ni una más ni una menos.
-do $$
+<<bloque_11>>
 declare v jsonb := pg_temp.s('anon') -> 'unidades';
         n_json integer; n_vivas integer; d_json integer; d_vista integer;
         ord_json text; ord_bd text; n_arch integer;
@@ -487,10 +520,10 @@ begin
 exception when others then
   perform pg_temp.anotar('CONTRATO', 'Totales: todas las unidades vivas, ninguna archivada, en orden de codigo; disponibles = v_unidades_ofrecibles',
     'unidades = vivas · 0 archivadas · mismo orden · disponibles = ofrecibles', sqlerrm, false);
-end $$;
+end;
 
 -- 3f · El estado de cada caso de prueba, y el polígono solo donde es válido.
-do $$
+<<bloque_12>>
 declare v jsonb := pg_temp.s('anon') -> 'unidades'; v_rep text; v_libre jsonb;
         v_esperado text :=
           'PRUEBA16-ARCHIVADA=ausente · PRUEBA16-ASIGNADA=no_disponible · '
@@ -518,12 +551,12 @@ begin
 exception when others then
   perform pg_temp.anotar('ESTADO', 'Separación viva → separada; solo asignada a una oportunidad activa → no_disponible; sin verificar → no_disponible; archivada → no sale',
     'los 7 casos', sqlerrm, false);
-end $$;
+end;
 
 -- 3g · Ni un dato privado: ningún id (de unidad, de titular, de la
 -- oportunidad o la separación de prueba) y ninguno de los textos privados
 -- de los datos de prueba aparece en la respuesta.
-do $$
+<<bloque_13>>
 declare v_txt text := pg_temp.s('anon')::text; v_hall text;
 begin
   select string_agg(distinct q.que, ', ') into v_hall
@@ -555,7 +588,7 @@ begin
 exception when others then
   perform pg_temp.anotar('PRIVACIDAD', 'La respuesta no lleva ids, titulares (nombre, teléfono) ni columnas internas (observaciones, revisar, fuentes, socio, legal, documento)',
     'ninguno', sqlerrm, false);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -564,7 +597,7 @@ end $$;
 -- La oportunidad que tenía asignada PRUEBA16-ASIGNADA pasa a pausada: la
 -- unidad vuelve a v_unidades_ofrecibles, sale «disponible» y la revisión
 -- cambia (la web redibuja).
-do $$
+<<bloque_14>>
 declare v_antes jsonb := pg_temp.s('anon'); v_despues jsonb; v_op uuid := pg_temp.f('op_asignada'); v_est text;
 begin
   update oportunidades set situacion = 'pausada' where id = v_op;
@@ -580,7 +613,7 @@ begin
 exception when others then
   perform pg_temp.anotar('REVISION', 'Soltar la asignación (oportunidad pausada) devuelve la unidad a disponible y cambia revision',
     'disponible · revision distinta', sqlerrm, false);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -591,7 +624,7 @@ end $$;
 -- columnas, y llaman a fn_inventario_publico_aviso(). Los de oportunidades
 -- van por fila y con WHEN (solo con unidad: sql/16 §3c); el de sentencia de
 -- la versión anterior ya no tiene que estar.
-do $$
+<<bloque_15>>
 declare v_real text; v_esperado text :=
   'oportunidades: fila after delete cuando | '
   'oportunidades: fila after insert cuando | '
@@ -620,7 +653,7 @@ begin
     ) d;
   perform pg_temp.anotar('DISPARADOR', 'Los seis disparadores del aviso: unidades y separaciones por sentencia; oportunidades por fila y solo con unidad; parametros por fila (solo el corte)',
     v_esperado, coalesce(v_real, 'ninguno'), v_real = v_esperado);
-end $$;
+end;
 
 -- 5b · Cada uno salta con lo que debe y no con lo que no: el rastro
 -- `mml.inventario_publico_tabla` (sql/16 §2) dice qué tabla disparó. Notas
@@ -630,7 +663,7 @@ end $$;
 -- unidad (lo que inserta fn_captar_prospecto, 12, que anon ejecuta) tampoco.
 -- Si avisara, el canal público diría si un teléfono ya era prospecto
 -- (sql/16 §3c).
-do $$
+<<bloque_16>>
 declare v_u uuid := pg_temp.f('u_libre'); v_sep uuid := pg_temp.f('separacion');
         v_op uuid := pg_temp.f('op_separacion'); v_op_u uuid := pg_temp.f('op_asignada');
         r_u text; r_s text; r_o text; r_p text; r_no text; r_lead text;
@@ -671,7 +704,7 @@ begin
 exception when others then
   perform pg_temp.anotar('DISPARADOR', 'Saltan con unidades, separaciones.estado, oportunidades.situacion (con unidad) y el corte; NO con notas, otro parámetro, una oportunidad sin unidad ni un lead nuevo sin unidad',
     'unidades · separaciones · oportunidades · parametros · sin aviso: nada · lead sin unidad: nada', sqlerrm, false);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -683,7 +716,7 @@ end $$;
 -- authenticated (sql/16 §2): si PostgreSQL lo exigiera al disparar, esto
 -- reventaría con «permission denied for function». Tiene que pasar, una fila
 -- cada una, y el rastro tiene que decir que el disparador saltó.
-do $$
+<<bloque_17>>
 declare v_u uuid := pg_temp.f('u_libre'); v_sep uuid := pg_temp.f('separacion');
         v_gestor uuid := pg_temp.f('gestor'); v_com uuid := pg_temp.f('comercial');
         n_u integer; n_s integer; r_u text; r_s text; v_paso text := 'inicio';
@@ -695,7 +728,7 @@ begin
      concat_ws(' · ', case when v_gestor is null then 'falta un perfil activo de direccion o administracion' end,
                       case when v_com is null then 'falta un perfil activo comercial' end),
      '🟡 OMITIDA');
-    return;
+    exit bloque_17;
   end if;
 
   v_paso := 'unidades como direccion/administracion';
@@ -730,7 +763,7 @@ exception when others then
   perform pg_temp.como(null);
   perform pg_temp.anotar('ESCRITURA', 'Con RLS (authenticated): actualizar una unidad y una separación no lo impide el aviso',
     'unidades 1 fila (saltó) · separaciones 1 fila (saltó)', v_paso || ': ' || sqlerrm, false);
-end $$;
+end;
 
 
 -- ---------------------------------------------------------------------
@@ -742,7 +775,7 @@ end $$;
 -- transacción puesta). El rollback lo borra antes de que salga.
 -- Más de uno puede ser actividad del CRM durante la prueba (otra
 -- transacción que confirmó entretanto) o que el agrupado no funciona: 🟡.
-do $$
+<<bloque_18>>
 declare v_send boolean := to_regprocedure('realtime.send(jsonb,text,text,boolean)') is not null;
         v_marca text := current_setting('mml.inventario_publico_aviso', true);
         v_tx text := txid_current()::text;
@@ -755,7 +788,7 @@ begin
     ('REALTIME', 'Cada transacción que mueve el inventario encola un aviso en el canal público inventario-publico',
      '1 mensaje nuevo en realtime.messages',
      'realtime.send no existe en este proyecto: la web se queda con su consulta periódica', '🟡 OMITIDA');
-    return;
+    exit bloque_18;
   end if;
 
   begin
@@ -780,14 +813,12 @@ begin
      when v_nuevos = 0                 then '🟡 REVISAR'         -- realtime.send se tragó un error (mira los WARNING)
      else '🟡 REVISAR'                                           -- más de uno: ver el comentario de arriba
    end);
-end $$;
-
--- @@FIN_CUERPO
+end;
 
 
--- =====================================================================
--- EL CUADRO FINAL (una sola consulta: el SQL Editor enseña solo la última)
--- =====================================================================
+    -- El cuadro, ANTES de deshacer: lo que se guarda en una variable sobrevive.
+    select jsonb_agg(to_jsonb(c) order by c.n) into v_cuadro
+      from (
 with resumen as (
   select 9999 as n,
          'RESUMEN' as regla,
@@ -807,12 +838,42 @@ from (
   union all
   select n, regla, veredicto, prueba, esperado, obtenido from resumen
 ) todo
-order by n;
+order by n
+      ) c;
+    -- Deshacer TODO lo que hizo la batería (unidades, personas, separaciones,
+    -- papeles, tablas y funciones temporales): un error atrapado justo abajo.
+    raise exception using errcode = 'P0999', message = 'deshacer la batería';
+  exception
+    when sqlstate 'P0999' then
+      null;
+    when others then
+      -- La batería se cayó a mitad de camino (p. ej. una regresión en la migración que prueba).
+      -- Lo que hizo ya se deshizo con el sub-bloque; el error no se esconde: sale como fila.
+      get stacked diagnostics v_ctx = pg_exception_context;
+      v_caida := sqlerrm;
+  end;
 
+  -- La función no se queda en la base: se borra a sí misma.
+  execute 'drop function if exists public.probar_reglas_16()';
 
--- =====================================================================
--- ⚠️ NO BORRES ESTA LÍNEA: deshace las unidades, la persona, las
--- oportunidades, la separación, el corte cambiado en 3c y el mensaje de
--- Realtime encolado (que así no llega a ningún navegador).
--- =====================================================================
-rollback;
+  if v_caida is not null then
+    return query
+      select 1, 'CAÍDA'::text, '🔴 FALLA'::text, 'La batería llegó hasta el final sin caerse'::text, 'sin error'::text,
+             left(v_caida || ' · ' || coalesce(replace(v_ctx, E'\n', ' | '), ''), 1200)::text
+      union all
+      select 9999, 'RESUMEN'::text, '0 pasan · 1 fallan · 0 omitidas · 0 revisar'::text, '1 pruebas'::text,
+             'La batería se cayó: la fila 🔴 de arriba dice dónde. Nada de lo que hizo quedó en la base'::text, ''::text;
+    return;
+  end if;
+
+  return query
+    select x.n, x.regla, x.veredicto, x.prueba, x.esperado, x.obtenido
+      from jsonb_to_recordset(v_cuadro)
+        as x(n integer, regla text, veredicto text, prueba text, esperado text, obtenido text)
+     order by x.n;
+end $bateria$;
+
+-- Nadie la puede llamar por la API mientras exista (solo quien la creó, en el editor).
+revoke all on function public.probar_reglas_16() from public, anon, authenticated;
+
+select * from public.probar_reglas_16();
